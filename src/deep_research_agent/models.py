@@ -1,22 +1,14 @@
-"""Compatibility wrapper for packaged model metadata contracts."""
+"""Provider-neutral model metadata contracts for the src LangGraph shim."""
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any, Protocol
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+from .configuration import AgentConfig, ModelProvider, load_config
 
-from deep_research_agent.models import (  # noqa: E402,F401
-    ConfiguredModelClient,
-    FallbackEvent,
-    ModelClient,
-    ModelRequest,
-    ModelResponse,
-    build_model_client,
-)
 
 @dataclass(frozen=True)
 class ModelRequest:
@@ -98,13 +90,7 @@ class ModelClient(Protocol):
 
 @dataclass(frozen=True)
 class ConfiguredModelClient:
-    """Import-safe placeholder client that exposes selected provider metadata.
-
-    The G003 graph can depend on deterministic provider selection and fallback
-    audit events before live transports exist. A provider with no configured
-    model is treated as unavailable and the client selects the next configured
-    provider from ``fallback_order`` while recording why the fallback occurred.
-    """
+    """Import-safe placeholder client that exposes selected provider metadata."""
 
     config: AgentConfig
 
@@ -126,10 +112,7 @@ class ConfiguredModelClient:
         self, request: ModelRequest
     ) -> tuple[ModelProvider, str, tuple[FallbackEvent, ...]]:
         events: list[FallbackEvent] = []
-        candidates = self.provider_sequence
-        if not candidates:
-            candidates = (self.primary_provider,)
-
+        candidates = self.provider_sequence or (self.primary_provider,)
         for candidate in candidates:
             model = self.config.provider_model(candidate)
             if model:
@@ -143,7 +126,6 @@ class ConfiguredModelClient:
                     retry_count=0,
                 )
             )
-
         provider = candidates[0]
         return provider, self.config.provider_model(provider), tuple(events)
 

@@ -10,8 +10,19 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from async_multi_search import SearchResult
+
 from .config import load_config
-from .graph import inspect_checkpoints, resume_research, run_research
+from .graph import (
+    inspect_research_thread,
+    inspect_thread,
+    resume_research,
+    resume_research_workflow,
+    resume_thread,
+    run_query,
+    run_research,
+    run_research_workflow,
+)
 
 
 def _checkpoint_payload(checkpoint: object) -> str:
@@ -69,6 +80,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Approve review immediately instead of stopping at the review interrupt.",
     )
     run_parser.add_argument("--json", action="store_true", help="Emit run result as JSON.")
+    run_parser.add_argument(
+        "--require-review",
+        action="store_true",
+        help="Stop at the compatibility review interrupt.",
+    )
+    run_parser.add_argument(
+        "--mock-result",
+        action="append",
+        default=[],
+        help="Add a mocked search result as title|url|snippet|provider.",
+    )
 
     resume_parser = subparsers.add_parser("resume", help="Resume a local G003 workflow thread.")
     resume_parser.add_argument("thread_id", help="Thread id to resume from checkpoint.")
@@ -80,12 +102,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Mark review approved before resuming the thread.",
     )
+    resume_parser.add_argument(
+        "--approve-review",
+        action="store_true",
+        help="Compatibility alias for --approve.",
+    )
     resume_parser.add_argument("--json", action="store_true", help="Emit resume result as JSON.")
 
     inspect_parser = subparsers.add_parser(
         "inspect", help="Inspect a local G003 workflow checkpoint."
     )
-    inspect_parser.add_argument("thread_id", help="Thread id to inspect.")
+    inspect_parser.add_argument("thread_id", nargs="?", help="Thread id to inspect.")
+    inspect_parser.add_argument(
+        "--thread-id", dest="thread_id_option", help="Thread id to inspect."
+    )
     inspect_parser.add_argument(
         "--checkpoint-dir", help="Directory for local JSON checkpoints.", default=None
     )
@@ -93,19 +123,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _print_graph_result(result: Any, *, as_json: bool) -> None:
-    payload = _jsonable(result)
-    if as_json:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return
-    state = payload["state"]
-    print(f"thread_id={payload['thread_id']}")
-    print(f"status={state.get('status')}")
-    print(f"checkpoint_path={payload['checkpoint_path']}")
-    if state.get("interrupt_reason"):
-        print(f"interrupt_reason={state['interrupt_reason']}")
-    if state.get("answer"):
-        print(f"answer={state['answer']}")
+def _print_json(payload: Any) -> None:
+    print(json.dumps(_jsonable(payload), indent=2, sort_keys=True))
+
+
+def _mock_search_from_specs(specs: Sequence[str]):
+    results: list[SearchResult] = []
+    for raw in specs:
+        parts = raw.split("|", 3)
+        if len(parts) != 4:
+            raise ValueError("--mock-result must be title|url|snippet|provider")
+        title, url, snippet, provider = parts
+        results.append(SearchResult(title, url, snippet, provider=provider))
+
+    async def search(_query: str, _max_results: int) -> list[SearchResult]:
+        return results
+
+    return search
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -129,40 +163,77 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "run":
-        from .graph import run_query
+        if args.json:
+            result = run_query(
+                args.query,
+                thread_id=args.thread_id,
+                checkpoint_dir=args.checkpoint_dir,
+                max_iterations=args.max_iterations,
+                approve=args.approve,
+            )
+            _print_json(result)
+            return 0
 
-        result = run_query(
-            args.query,
-            thread_id=args.thread_id,
-            checkpoint_dir=args.checkpoint_dir,
-            max_iterations=args.max_iterations,
-            approve=args.approve,
+        if args.require_review or args.mock_result:
+            state = asyncio.run(
+                run_research(
+                    args.query,
+                    thread_id=args.thread_id,
+                    checkpoint_dir=args.checkpoint_dir,
+                    search=_mock_search_from_specs(args.mock_result) if args.mock_result else None,
+                    require_review=args.require_review,
+                    max_iterations=args.max_iterations,
+                    review_approved=args.approve,
+                )
+            )
+            _print_json(state)
+            return 0
+
+        checkpoint = run_research_workflow(
+            args.query, thread_id=args.thread_id, checkpoint_dir=args.checkpoint_dir
         )
-        _print_graph_result(result, as_json=args.json)
+        _print_json(checkpoint.to_dict())
         return 0
 
     if args.command == "resume":
-        from .graph import resume_thread
+        approve = bool(args.approve or args.approve_review)
+        if args.json:
+            result = resume_thread(
+                args.thread_id,
+                checkpoint_dir=args.checkpoint_dir,
+                approve=approve,
+            )
+            _print_json(result)
+            return 0
 
-        result = resume_thread(
-            args.thread_id,
-            checkpoint_dir=args.checkpoint_dir,
-            approve=args.approve,
-        )
-        _print_graph_result(result, as_json=args.json)
+        if args.approve_review:
+            state = asyncio.run(
+                resume_research(
+                    args.thread_id, checkpoint_dir=args.checkpoint_dir, approve_review=True
+                )
+            )
+            _print_json(state)
+            return 0
+
+        checkpoint = resume_research_workflow(args.thread_id, checkpoint_dir=args.checkpoint_dir)
+        _print_json(checkpoint.to_dict())
         return 0
 
     if args.command == "inspect":
-        from .graph import inspect_thread
-
-        payload = inspect_thread(args.thread_id, checkpoint_dir=args.checkpoint_dir)
+        thread_id = args.thread_id_option or args.thread_id
+        if not thread_id:
+            parser.error("inspect requires a thread id")
         if args.json:
-            print(json.dumps(payload, indent=2, sort_keys=True))
-        else:
-            state = payload.get("state", {})
-            print(f"thread_id={payload.get('thread_id')}")
-            print(f"status={state.get('status')}")
-            print(f"checkpoint_path={payload.get('checkpoint_path')}")
+            _print_json(inspect_thread(thread_id, checkpoint_dir=args.checkpoint_dir))
+            return 0
+        if args.thread_id_option:
+            checkpoint = inspect_research_thread(
+                thread_id, checkpoint_dir=args.checkpoint_dir
+            )
+            _print_json(checkpoint.state)
+            return 0
+        checkpoint = inspect_research_thread(thread_id, checkpoint_dir=args.checkpoint_dir)
+        _print_json(checkpoint.to_dict())
         return 0
 
     parser.print_help()
