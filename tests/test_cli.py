@@ -14,6 +14,9 @@ def test_module_cli_help() -> None:
 
     assert "Local-first deep research agent foundation" in result.stdout
     assert "config" in result.stdout
+    assert "run" in result.stdout
+    assert "resume" in result.stdout
+    assert "inspect" in result.stdout
 
 
 def test_cli_config_json() -> None:

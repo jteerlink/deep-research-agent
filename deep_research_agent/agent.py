@@ -309,7 +309,11 @@ def _build_graph() -> Any:
         return _fallback_graph
 
     async def main_node(state: ResearchState) -> ResearchState:
-        return {**state, "events": [*_state_events(state), asdict(_event("main_started", "main", "Research workflow started."))]}
+        events = [
+            *_state_events(state),
+            asdict(_event("main_started", "main", "Research workflow started.")),
+        ]
+        return {**state, "events": events}
 
     async def supervisor_node(state: ResearchState) -> ResearchState:
         events = [

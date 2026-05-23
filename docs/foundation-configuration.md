@@ -37,6 +37,27 @@ continue to support:
 from async_multi_search import web_search
 ```
 
+
+## G003 local workflow checkpoints
+
+The G003 workflow keeps the LangGraph entry point import-safe while adding a
+local nested execution contract for development and tests:
+
+```text
+main -> supervisor -> researcher -> supervisor/review
+```
+
+`python -m deep_research_agent run <query>` writes a JSON checkpoint containing
+the thread id, supervisor delegation event, researcher iteration events, model
+fallback metadata, sufficiency or max-iteration routing, and the review
+interrupt. `resume <thread-id>` reloads that same local checkpoint and completes
+the review gate; `inspect <thread-id>` prints the saved state. The default
+checkpoint directory is `.deep_research_agent/checkpoints`, and each command
+accepts `--checkpoint-dir` for isolated test runs.
+
+This remains a local-first development surface: no hosted UI, no model zoo, no
+database service, and no multi-user runtime are introduced by checkpointing.
+
 ## LangGraph entry point
 
 `langgraph.json` declares the graph as:
