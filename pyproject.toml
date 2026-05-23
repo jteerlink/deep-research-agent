@@ -26,6 +26,7 @@ langgraph = [
 dev = [
   "pytest>=8",
   "ruff>=0.6",
+  "mypy>=1.13",
 ]
 
 [project.scripts]

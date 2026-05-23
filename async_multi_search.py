@@ -166,9 +166,9 @@ class DuckDuckGoProvider(SearchProvider):
 
     def _sync_search(self, query, max_results):
         try:
-            from ddgs import DDGS  # current package
+            from ddgs import DDGS  # type: ignore[import-not-found]  # current package
         except ImportError:
-            from duckduckgo_search import DDGS  # legacy name
+            from duckduckgo_search import DDGS  # type: ignore[import-not-found]  # legacy name
         with DDGS() as ddgs:
             return list(ddgs.text(query, max_results=max_results))
 

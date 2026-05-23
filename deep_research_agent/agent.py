@@ -25,7 +25,7 @@ async def _fallback_graph(state: ResearchState) -> ResearchState:
 
 def _build_graph() -> Any:
     try:
-        from langgraph.graph import END, StateGraph
+        from langgraph.graph import END, StateGraph  # type: ignore[import-not-found]
     except ImportError:
         return _fallback_graph
 
