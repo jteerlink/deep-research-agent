@@ -162,7 +162,9 @@ def evidence_reference_schema() -> dict[str, Any]:
     }
 
 
-def normalize_evidence_catalog(evidence: Iterable[EvidenceReference | Mapping[str, Any] | Any]) -> dict[str, EvidenceReference]:
+def normalize_evidence_catalog(
+    evidence: Iterable[EvidenceReference | Mapping[str, Any] | Any],
+) -> dict[str, EvidenceReference]:
     """Normalize mappings or object-like evidence records by ``evidence_id``.
 
     The function accepts aliases used by search wrappers (``id``/``source_url`` /
@@ -213,7 +215,9 @@ def validate_citation(
         if _normalize_text(normalized.quote) not in _normalize_text(evidence.content):
             raise CitationValidationError("citation quote is not present in page_read evidence")
 
-    if normalized.quote and _normalize_text(normalized.quote) not in _normalize_text(evidence.content):
+    if normalized.quote and _normalize_text(normalized.quote) not in _normalize_text(
+        evidence.content
+    ):
         raise CitationValidationError("citation quote is not present in cited evidence")
 
     return normalized
@@ -235,7 +239,9 @@ def validate_prospect(
         raise CitationValidationError("prospect requires at least one citation")
 
     catalog = evidence if isinstance(evidence, Mapping) else normalize_evidence_catalog(evidence)
-    validated_citations = tuple(validate_citation(citation, catalog) for citation in normalized.citations)
+    validated_citations = tuple(
+        validate_citation(citation, catalog) for citation in normalized.citations
+    )
     return ProspectRecord(
         organization=normalized.organization,
         website=normalized.website,
@@ -258,7 +264,9 @@ def validate_prospects(
     return [validate_prospect(prospect, catalog) for prospect in prospects]
 
 
-def _coerce_evidence_reference(item: EvidenceReference | Mapping[str, Any] | Any) -> EvidenceReference:
+def _coerce_evidence_reference(
+    item: EvidenceReference | Mapping[str, Any] | Any,
+) -> EvidenceReference:
     if isinstance(item, EvidenceReference):
         return item
 
