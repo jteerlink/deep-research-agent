@@ -36,16 +36,22 @@ class ArtifactWriteResult:
     fieldnames: tuple[str, ...]
 
 
-def _coerce_payload(payload: Any) -> Any:
-    if isinstance(payload, SearchEvidenceArtifact):
-        return payload.to_dict()
-    if isinstance(payload, EvidenceRecord | Prospect):
-        return payload.to_dict()
-    if isinstance(payload, Mapping):
-        return {str(key): _coerce_payload(value) for key, value in payload.items()}
-    if isinstance(payload, Iterable) and not isinstance(payload, (str, bytes)):
-        return [_coerce_payload(item) for item in payload]
-    return payload
+def _coerce_record(record: ArtifactRecord | object) -> dict[str, Any]:
+    if is_dataclass(record) and not isinstance(record, type):
+        raw_record = asdict(record)
+    elif isinstance(record, Mapping):
+        raw_record = dict(record)
+    else:
+        raise TypeError(
+            f"artifact records must be mappings or dataclass instances, got {type(record)!r}"
+        )
+
+    coerced: dict[str, Any] = {}
+    for key, value in raw_record.items():
+        if not isinstance(key, str):
+            raise TypeError(f"artifact record keys must be strings, got {key!r}")
+        coerced[key] = value
+    return coerced
 
 
 def _normalize_records(records: Iterable[ArtifactRecord | object]) -> list[dict[str, Any]]:
