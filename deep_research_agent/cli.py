@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
 
-from .agent import inspect_research_thread, resume_research_workflow, run_research_workflow
+from async_multi_search import SearchResult
+
 from .config import load_config
+from .graph import inspect_checkpoints, resume_research, run_research
 
 
 def _checkpoint_payload(checkpoint: object) -> str:
@@ -35,57 +38,70 @@ def build_parser() -> argparse.ArgumentParser:
         help="List async_multi_search.py provider order and required environment keys.",
     )
 
-    run_parser = subparsers.add_parser(
-        "run",
-        help="Run a local G003 research workflow and write a thread checkpoint.",
-    )
-    run_parser.add_argument("query", help="Research query to run through the nested workflow.")
-    run_parser.add_argument(
-        "--thread-id",
-        help="Optional stable thread id. Defaults to a generated local-* id.",
-    )
+    run_parser = subparsers.add_parser("run", help="Run a local research workflow thread.")
+    run_parser.add_argument("query", help="Research query to execute.")
+    run_parser.add_argument("--thread-id", help="Optional durable thread id to use.")
     run_parser.add_argument(
         "--checkpoint-dir",
-        default=None,
-        help="Directory for local JSON checkpoints (default: .deep_research_agent/checkpoints).",
+        help="Directory for local JSON checkpoints (default: DEEP_RESEARCH_CHECKPOINT_DIR or .deep_research_agent/checkpoints).",
     )
     run_parser.add_argument(
-        "--approve",
+        "--require-review",
         action="store_true",
-        help="Complete the review gate immediately instead of stopping at the review interrupt.",
+        help="Persist a review interrupt instead of finalizing immediately.",
+    )
+    run_parser.add_argument("--max-iterations", type=int, default=3)
+    run_parser.add_argument("--min-evidence-records", type=int, default=1)
+    run_parser.add_argument(
+        "--mock-result",
+        action="append",
+        default=[],
+        metavar="TITLE|URL|TEXT|PROVIDER",
+        help="Add a deterministic mocked search result for local smoke tests. May be repeated.",
     )
 
-    resume_parser = subparsers.add_parser(
-        "resume",
-        help="Resume a local G003 workflow checkpoint by thread id.",
-    )
-    resume_parser.add_argument("thread_id", help="Thread id to resume.")
+    resume_parser = subparsers.add_parser("resume", help="Resume a local research workflow thread.")
+    resume_parser.add_argument("thread_id", help="Durable thread id to resume.")
+    resume_parser.add_argument("--checkpoint-dir", help="Directory containing local JSON checkpoints.")
     resume_parser.add_argument(
-        "--checkpoint-dir",
-        default=None,
-        help="Directory for local JSON checkpoints (default: .deep_research_agent/checkpoints).",
-    )
-    resume_parser.add_argument(
-        "--no-approve",
+        "--approve-review",
         action="store_true",
-        help="Re-enter the review interrupt instead of approving completion.",
+        help="Approve a pending review interrupt and finish the thread.",
+    )
+    resume_parser.add_argument(
+        "--mock-result",
+        action="append",
+        default=[],
+        metavar="TITLE|URL|TEXT|PROVIDER",
+        help="Add a deterministic mocked search result for resumed local smoke tests.",
     )
 
-    inspect_parser = subparsers.add_parser(
-        "inspect",
-        help="Print a local G003 workflow checkpoint by thread id.",
-    )
-    inspect_parser.add_argument("thread_id", help="Thread id to inspect.")
-    inspect_parser.add_argument(
-        "--checkpoint-dir",
-        default=None,
-        help="Directory for local JSON checkpoints (default: .deep_research_agent/checkpoints).",
-    )
+    inspect_parser = subparsers.add_parser("inspect", help="Inspect local research checkpoints.")
+    inspect_parser.add_argument("--thread-id", help="Optional thread id to inspect.")
+    inspect_parser.add_argument("--checkpoint-dir", help="Directory containing local JSON checkpoints.")
     return parser
 
 
-def _path_or_default(raw: str | None) -> str | Path:
-    return raw if raw is not None else Path(".deep_research_agent") / "checkpoints"
+def _mock_search_from_args(values: Sequence[str]):
+    if not values:
+        return None
+
+    parsed: list[SearchResult] = []
+    for raw in values:
+        parts = raw.split("|", 3)
+        if len(parts) != 4:
+            raise ValueError("--mock-result must be TITLE|URL|TEXT|PROVIDER")
+        title, url, text, provider = parts
+        parsed.append(SearchResult(title=title, url=url, content=text, provider=provider))
+
+    async def search(_query: str, max_results: int):
+        return parsed[:max_results]
+
+    return search
+
+
+def _print_state(state: dict) -> None:
+    print(json.dumps(state, indent=2, sort_keys=True))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -109,30 +125,45 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "run":
-        checkpoint = run_research_workflow(
-            args.query,
-            thread_id=args.thread_id,
-            checkpoint_dir=_path_or_default(args.checkpoint_dir),
-            approve=args.approve,
-        )
-        print(_checkpoint_payload(checkpoint))
+        try:
+            search = _mock_search_from_args(args.mock_result)
+            state = asyncio.run(
+                run_research(
+                    args.query,
+                    thread_id=args.thread_id,
+                    checkpoint_dir=args.checkpoint_dir,
+                    require_review=args.require_review,
+                    max_iterations=args.max_iterations,
+                    min_evidence_records=args.min_evidence_records,
+                    search=search,
+                )
+            )
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+        _print_state(state)
         return 0
 
     if args.command == "resume":
-        checkpoint = resume_research_workflow(
-            args.thread_id,
-            checkpoint_dir=_path_or_default(args.checkpoint_dir),
-            approve=not args.no_approve,
-        )
-        print(_checkpoint_payload(checkpoint))
+        try:
+            search = _mock_search_from_args(args.mock_result)
+            state = asyncio.run(
+                resume_research(
+                    args.thread_id,
+                    checkpoint_dir=args.checkpoint_dir,
+                    approve_review=args.approve_review,
+                    search=search,
+                )
+            )
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+        _print_state(state)
         return 0
 
     if args.command == "inspect":
-        checkpoint = inspect_research_thread(
-            args.thread_id,
-            checkpoint_dir=_path_or_default(args.checkpoint_dir),
-        )
-        print(_checkpoint_payload(checkpoint))
+        try:
+            _print_state(inspect_checkpoints(args.thread_id, checkpoint_dir=args.checkpoint_dir))
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
         return 0
 
     parser.print_help()
