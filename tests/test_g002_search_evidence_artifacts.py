@@ -104,6 +104,28 @@ def test_collect_search_evidence_keeps_malformed_result_as_recoverable_failure()
     assert "absolute" in artifact.failures[0].error_message
 
 
+def test_collect_search_evidence_quarantines_invalid_items_and_accepts_mappings() -> None:
+    async def mixed_search(query: str, max_results: int) -> list[object]:  # type: ignore[override]
+        return [
+            object(),
+            {
+                "title": "Mapped",
+                "url": "https://example.com/mapped",
+                "content": "mapped snippet",
+                "provider": "custom",
+            },
+        ]
+
+    artifact = asyncio.run(collect_search_evidence("mixed raw", search_fn=mixed_search))  # type: ignore[arg-type]
+
+    assert artifact.ok is True
+    assert [record.url for record in artifact.evidence] == ["https://example.com/mapped"]
+    assert artifact.evidence[0].kind is EvidenceKind.SNIPPET
+    assert len(artifact.failures) == 1
+    assert artifact.failures[0].error_class == "TypeError"
+    assert "object" in artifact.failures[0].error_message
+
+
 def test_prospect_and_evidence_schemas_expose_required_citation_contract() -> None:
     assert set(evidence_schema()["required"]) == {"id", "query", "title", "url", "content", "kind"}
     assert evidence_schema()["properties"]["kind"]["enum"] == ["snippet", "page_read"]

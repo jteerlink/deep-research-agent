@@ -279,6 +279,30 @@ def coerce_prospect(raw: Mapping[str, Any]) -> Prospect:
     )
 
 
+def coerce_search_result(raw: Any) -> SearchResult:
+    """Coerce legacy/mapping search output into ``SearchResult``.
+
+    The async dispatcher normally returns ``SearchResult`` instances, but custom
+    injected search callables and malformed providers can leak mapping-like or
+    invalid objects. Coercion at the evidence boundary keeps failures local and
+    serializable.
+    """
+
+    if isinstance(raw, SearchResult):
+        return raw
+    if isinstance(raw, Mapping):
+        url = raw.get("url", raw.get("link", raw.get("href", "")))
+        content = raw.get("content", raw.get("text", raw.get("snippet", raw.get("body", ""))))
+        return SearchResult(
+            title=str(raw.get("title", "")),
+            url=str(url),
+            content=str(content),
+            score=raw.get("score") if isinstance(raw.get("score"), int | float) else None,
+            provider=str(raw.get("provider", "")),
+        )
+    raise TypeError(f"search result must be SearchResult or mapping, got {type(raw).__name__}")
+
+
 async def collect_search_evidence(
     query: str,
     *,
@@ -313,8 +337,11 @@ async def collect_search_evidence(
     retrieved_at = datetime.now(UTC).isoformat()
     evidence: list[EvidenceRecord] = []
     failures: list[SearchFailure] = []
-    for index, result in enumerate(results, start=1):
+    for index, raw_result in enumerate(results, start=1):
+        provider = getattr(raw_result, "provider", "")
         try:
+            result = coerce_search_result(raw_result)
+            provider = result.provider
             evidence.append(
                 EvidenceRecord.from_search_result(
                     result,
@@ -323,11 +350,11 @@ async def collect_search_evidence(
                     retrieved_at=retrieved_at,
                 )
             )
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             failures.append(
                 SearchFailure(
                     query=normalized_query,
-                    provider=result.provider,
+                    provider=str(provider),
                     error_class=type(exc).__name__,
                     error_message=str(exc),
                 )
