@@ -1,322 +1,226 @@
-"""LangGraph dev-server entry point for the deep research agent.
+"""LangGraph entry point for the deep research agent workflow.
 
-The packaged implementation lives in ``deep_research_agent.graph``. This src
-path is retained because ``langgraph.json`` points here for local LangGraph
-dev-server compatibility.
+The canonical development-server entry point in ``langgraph.json`` points at
+this module.  LangGraph remains an optional dependency for local development,
+so the exported ``graph`` is an import-safe local runner when LangGraph is not
+installed.  The local runner mirrors the G003 topology closely enough for
+tests, CLI smoke runs, and checkpoint/resume development without requiring a
+hosted UI, database, or live model provider.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
-import sys
+from typing import Any, Literal, TypedDict
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+GraphNode = Literal["main", "supervisor", "researcher", "review", "end"]
 
-from deep_research_agent.graph import (  # noqa: E402,F401
-    CHECKPOINT_SCHEMA_VERSION,
-    DEFAULT_MAX_ITERATIONS,
-    GRAPH_TOPOLOGY,
-    LocalCheckpointStore,
-    LocalCompiledGraph,
-    LocalResearchWorkflow,
-    ResearchState,
-    ReviewInterrupt,
-    graph,
-    inspect_checkpoints,
-    main_node,
-    researcher_node,
-    resume_research,
-    review_node,
-    route_after_supervisor,
-    run_research,
-    supervisor_node,
-)
-
-__all__ = [
-    "CHECKPOINT_SCHEMA_VERSION",
-    "DEFAULT_MAX_ITERATIONS",
-    "GRAPH_TOPOLOGY",
-    "LocalCheckpointStore",
-    "LocalCompiledGraph",
-    "LocalResearchWorkflow",
-    "ResearchState",
-    "ReviewInterrupt",
-    "graph",
-    "inspect_checkpoints",
-    "main_node",
-    "researcher_node",
-    "resume_research",
-    "review_node",
-    "route_after_supervisor",
-    "run_research",
-    "supervisor_node",
-]
+DEFAULT_MAX_ITERATIONS = 2
+DEFAULT_REQUIRED_NOTES = 2
+DEFAULT_CHECKPOINT_DIR = ".deep_research_agent/checkpoints"
 
 
 class ResearchState(TypedDict, total=False):
-    """State shape shared by the import-safe graph and local checkpoint runner."""
+    """State passed through the nested local research workflow."""
 
     query: str
     thread_id: str
     answer: str
-    status: WorkflowStatus
-    iterations: int
+    current_node: GraphNode
+    next_node: GraphNode
+    visited_nodes: list[str]
+    research_notes: list[str]
+    iteration: int
+    max_iterations: int
+    required_notes: int
     sufficient: bool
+    status: str
+    interrupted: bool
     review_required: bool
-    review_decision: str
-    events: list[dict[str, Any]]
-    fallback_metadata: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class WorkflowEvent:
-    """A serializable workflow event recorded in thread checkpoints."""
-
-    type: WorkflowEventType
-    node: str
-    message: str
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class ThreadCheckpoint:
-    """Durable state for one local research workflow thread."""
-
+    review_approved: bool
     thread_id: str
-    query: str
-    status: WorkflowStatus
-    iterations: int
-    sufficient: bool
-    review_required: bool
-    answer: str
-    events: tuple[WorkflowEvent, ...]
-    fallback_metadata: dict[str, Any] = field(default_factory=dict)
-    updated_at: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        payload = asdict(self)
-        payload["events"] = [asdict(event) for event in self.events]
-        return payload
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> ThreadCheckpoint:
-        events = tuple(WorkflowEvent(**event) for event in payload.get("events", ()))
-        return cls(
-            thread_id=str(payload["thread_id"]),
-            query=str(payload.get("query", "")),
-            status=payload.get("status", "needs_review"),  # type: ignore[arg-type]
-            iterations=int(payload.get("iterations", 0)),
-            sufficient=bool(payload.get("sufficient", False)),
-            review_required=bool(payload.get("review_required", False)),
-            answer=str(payload.get("answer", "")),
-            events=events,
-            fallback_metadata=dict(payload.get("fallback_metadata") or {}),
-            updated_at=str(payload.get("updated_at", "")),
-        )
+    fallback_events: list[dict[str, Any]]
 
 
-class LocalCheckpointStore:
-    """JSON-file checkpoint store keyed by LangGraph-style thread id."""
+def checkpoint_path(thread_id: str, checkpoint_dir: str | Path = DEFAULT_CHECKPOINT_DIR) -> Path:
+    """Return the durable local checkpoint path for a thread id."""
 
-    def __init__(self, root: str | Path = DEFAULT_CHECKPOINT_DIR) -> None:
-        self.root = Path(root)
-
-    def _path(self, thread_id: str) -> Path:
-        safe_thread_id = thread_id.replace("/", "_")
-        return self.root / f"{safe_thread_id}.json"
-
-    def save(self, checkpoint: ThreadCheckpoint) -> ThreadCheckpoint:
-        self.root.mkdir(parents=True, exist_ok=True)
-        updated = replace(checkpoint, updated_at=datetime.now(UTC).isoformat())
-        self._path(updated.thread_id).write_text(
-            json.dumps(updated.to_dict(), indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        return updated
-
-    def load(self, thread_id: str) -> ThreadCheckpoint:
-        path = self._path(thread_id)
-        if not path.exists():
-            raise FileNotFoundError(f"No checkpoint found for thread id {thread_id!r}")
-        return ThreadCheckpoint.from_dict(json.loads(path.read_text(encoding="utf-8")))
+    safe_thread_id = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in thread_id)
+    return Path(checkpoint_dir) / f"{safe_thread_id}.json"
 
 
-def _event(
-    event_type: WorkflowEventType,
-    node: str,
-    message: str,
-    **metadata: Any,
-) -> WorkflowEvent:
-    return WorkflowEvent(type=event_type, node=node, message=message, metadata=metadata)
-
-
-def _fallback_metadata(reason: str = "local_mock") -> dict[str, Any]:
-    return {
-        "provider": "local_mock",
-        "model": "deterministic-researcher",
-        "reason": reason,
-    }
-
-
-def _research_answer(query: str, iteration: int) -> str:
-    return f"Draft research answer for {query!r} after {iteration} iteration(s)."
-
-
-def _build_checkpoint(
+def save_checkpoint(
+    state: ResearchState,
     *,
-    query: str,
     thread_id: str,
-    approve: bool,
-    previous_events: tuple[WorkflowEvent, ...] = (),
-) -> ThreadCheckpoint:
-    events: list[WorkflowEvent] = list(previous_events)
-    if previous_events:
-        events.append(_event("review_resumed", "main", "Review decision accepted."))
+    checkpoint_dir: str | Path = DEFAULT_CHECKPOINT_DIR,
+) -> Path:
+    """Persist state for local thread-id resume flows."""
+
+    path = checkpoint_path(thread_id, checkpoint_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def load_checkpoint(
+    thread_id: str,
+    checkpoint_dir: str | Path = DEFAULT_CHECKPOINT_DIR,
+) -> ResearchState:
+    """Load a previously persisted local checkpoint."""
+
+    path = checkpoint_path(thread_id, checkpoint_dir)
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _configurable(config: dict[str, Any] | None) -> dict[str, Any]:
+    if not config:
+        return {}
+    value = config.get("configurable", {})
+    return value if isinstance(value, dict) else {}
+
+
+def _thread_id(state: ResearchState, config: dict[str, Any] | None) -> str:
+    configured = _configurable(config).get("thread_id")
+    if configured:
+        return str(configured)
+    return state.get("thread_id") or "local"
+
+
+def _checkpoint_dir(config: dict[str, Any] | None) -> str | Path:
+    configured = _configurable(config).get("checkpoint_dir")
+    return configured if configured else DEFAULT_CHECKPOINT_DIR
+
+
+def _visit(state: ResearchState, node: GraphNode) -> None:
+    state["current_node"] = node
+    state.setdefault("visited_nodes", []).append(node)
+
+
+def _main_node(state: ResearchState) -> ResearchState:
+    _visit(state, "main")
+    state.setdefault("research_notes", [])
+    state.setdefault("fallback_events", [])
+    state["iteration"] = int(state.get("iteration", 0))
+    state["max_iterations"] = int(state.get("max_iterations", DEFAULT_MAX_ITERATIONS))
+    state["required_notes"] = int(state.get("required_notes", DEFAULT_REQUIRED_NOTES))
+    state["status"] = "running"
+    state["next_node"] = "supervisor"
+    return state
+
+
+def _supervisor_node(state: ResearchState) -> ResearchState:
+    _visit(state, "supervisor")
+    notes = state.get("research_notes", [])
+    required_notes = int(state.get("required_notes", DEFAULT_REQUIRED_NOTES))
+    max_iterations = int(state.get("max_iterations", DEFAULT_MAX_ITERATIONS))
+    iteration = int(state.get("iteration", 0))
+    sufficient = bool(state.get("sufficient")) or len(notes) >= required_notes
+    state["sufficient"] = sufficient
+    if sufficient:
+        state["status"] = "completed"
+        state["answer"] = state.get("answer") or f"Research complete for: {state.get('query', '')}"
+        state["next_node"] = "end"
+    elif iteration >= max_iterations:
+        state["status"] = "completed"
+        state["answer"] = (
+            state.get("answer")
+            or f"Research stopped after {max_iterations} iteration(s): {state.get('query', '')}"
+        )
+        state["next_node"] = "end"
     else:
-        events.append(_event("main_started", "main", "Research workflow started."))
-
-    events.append(
-        _event(
-            "supervisor_delegated",
-            "supervisor",
-            "Supervisor delegated the query to the researcher graph.",
-            thread_id=thread_id,
-        )
-    )
-
-    fallback = _fallback_metadata()
-    sufficient = False
-    answer = ""
-    iterations = 0
-    for iteration in range(1, MAX_RESEARCH_ITERATIONS + 1):
-        iterations = iteration
-        answer = _research_answer(query, iteration)
-        events.append(
-            _event(
-                "fallback_model_used",
-                "researcher",
-                "No configured live model was required; used deterministic fallback metadata.",
-                **fallback,
-            )
-        )
-        events.append(
-            _event(
-                "researcher_iteration",
-                "researcher",
-                "Researcher produced a draft answer.",
-                iteration=iteration,
-            )
-        )
-        sufficient = bool(query.strip()) and iteration >= 1
-        if sufficient:
-            events.append(
-                _event(
-                    "sufficiency_routed",
-                    "supervisor",
-                    "Supervisor routed sufficient research to review.",
-                    iteration=iteration,
-                )
-            )
-            break
-
-    if not sufficient:
-        events.append(
-            _event(
-                "max_iterations_routed",
-                "supervisor",
-                "Supervisor stopped after the maximum researcher iterations.",
-                max_iterations=MAX_RESEARCH_ITERATIONS,
-            )
-        )
-
-    if not approve:
-        events.append(
-            _event(
-                "review_interrupt",
-                "review",
-                "Human review interrupt reached; resume with approval to complete.",
-            )
-        )
-        return ThreadCheckpoint(
-            thread_id=thread_id,
-            query=query,
-            status="needs_review",
-            iterations=iterations,
-            sufficient=sufficient,
-            review_required=True,
-            answer=answer,
-            events=tuple(events),
-            fallback_metadata=fallback,
-        )
-
-    events.append(_event("workflow_completed", "main", "Approved research workflow completed."))
-    return ThreadCheckpoint(
-        thread_id=thread_id,
-        query=query,
-        status="complete",
-        iterations=iterations,
-        sufficient=sufficient,
-        review_required=False,
-        answer=answer,
-        events=tuple(events),
-        fallback_metadata=fallback,
-    )
+        state["next_node"] = "researcher"
+    return state
 
 
-def run_research_workflow(
-    query: str,
-    *,
-    thread_id: str | None = None,
-    checkpoint_dir: str | Path = DEFAULT_CHECKPOINT_DIR,
-    approve: bool = False,
-) -> ThreadCheckpoint:
-    """Run a local nested workflow and persist its checkpoint."""
-
-    resolved_thread_id = thread_id or f"local-{uuid4()}"
-    checkpoint = _build_checkpoint(query=query, thread_id=resolved_thread_id, approve=approve)
-    return LocalCheckpointStore(checkpoint_dir).save(checkpoint)
+def _researcher_node(state: ResearchState) -> ResearchState:
+    _visit(state, "researcher")
+    iteration = int(state.get("iteration", 0)) + 1
+    state["iteration"] = iteration
+    query = state.get("query", "")
+    state.setdefault("research_notes", []).append(f"mock research note {iteration}: {query}")
+    state["next_node"] = "supervisor"
+    return state
 
 
-def resume_research_workflow(
-    thread_id: str,
-    *,
-    checkpoint_dir: str | Path = DEFAULT_CHECKPOINT_DIR,
-    approve: bool = True,
-) -> ThreadCheckpoint:
-    """Load a thread checkpoint and continue from its review interrupt."""
-
-    store = LocalCheckpointStore(checkpoint_dir)
-    current = store.load(thread_id)
-    if current.status == "complete":
-        return current
-    checkpoint = _build_checkpoint(
-        query=current.query,
-        thread_id=current.thread_id,
-        approve=approve,
-        previous_events=current.events,
-    )
-    return store.save(checkpoint)
-
-
-def inspect_research_thread(
-    thread_id: str,
-    *,
-    checkpoint_dir: str | Path = DEFAULT_CHECKPOINT_DIR,
-) -> ThreadCheckpoint:
-    """Return the durable checkpoint for a workflow thread id."""
-
-    return LocalCheckpointStore(checkpoint_dir).load(thread_id)
+def _review_node(state: ResearchState) -> ResearchState:
+    _visit(state, "review")
+    if state.get("review_required") and not state.get("review_approved"):
+        state["status"] = "interrupted"
+        state["interrupted"] = True
+        state["next_node"] = "review"
+    else:
+        state["interrupted"] = False
+        state["next_node"] = "supervisor"
+    return state
 
 
 async def _fallback_graph(state: ResearchState) -> ResearchState:
-    checkpoint = run_research_workflow(
-        state.get("query", ""),
-        thread_id=state.get("thread_id"),
-        approve=bool(state.get("review_decision") == "approve"),
-    )
-    return {**state, **checkpoint.to_dict()}
+    return await LocalResearchGraph().ainvoke(state)
+
+
+class LocalResearchGraph:
+    """Small local runner that mirrors the G003 graph contract without LangGraph."""
+
+    node_names = ("main", "supervisor", "researcher", "review")
+
+    async def ainvoke(
+        self,
+        state: ResearchState,
+        config: dict[str, Any] | None = None,
+    ) -> ResearchState:
+        thread_id = _thread_id(state, config)
+        checkpoint_dir = _checkpoint_dir(config)
+        if state.get("resume"):
+            resumed = load_checkpoint(thread_id, checkpoint_dir)
+            resumed.update({key: value for key, value in state.items() if key != "resume"})
+            state = resumed
+        else:
+            state = dict(state)
+        state["thread_id"] = thread_id
+
+        if state.get("review_required") and not state.get("review_approved"):
+            _main_node(state)
+            _review_node(state)
+            save_checkpoint(state, thread_id=thread_id, checkpoint_dir=checkpoint_dir)
+            return state
+
+        _main_node(state)
+        while state.get("next_node") != "end":
+            next_node = state["next_node"]
+            if next_node == "supervisor":
+                _supervisor_node(state)
+            elif next_node == "researcher":
+                _researcher_node(state)
+            elif next_node == "review":
+                _review_node(state)
+                if state.get("interrupted"):
+                    break
+            else:  # pragma: no cover - defensive guard for corrupted state.
+                raise ValueError(f"unknown graph node: {next_node}")
+
+        save_checkpoint(state, thread_id=thread_id, checkpoint_dir=checkpoint_dir)
+        return state
+
+    def invoke(
+        self,
+        state: ResearchState,
+        config: dict[str, Any] | None = None,
+    ) -> ResearchState:
+        """Synchronous convenience wrapper matching compiled LangGraph shape."""
+
+        return asyncio.run(self.ainvoke(state, config))
+
+    def get_state(
+        self,
+        config: dict[str, Any] | None = None,
+    ) -> ResearchState:
+        """Return the last durable local checkpoint for a configured thread id."""
+
+        thread_id = _thread_id({}, config)
+        return load_checkpoint(thread_id, _checkpoint_dir(config))
 
 
 def _build_graph() -> Any:
