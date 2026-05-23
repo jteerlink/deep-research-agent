@@ -26,3 +26,16 @@ def test_cli_config_json() -> None:
 
     assert '"primary_provider"' in result.stdout
     assert '"ollama_native"' in result.stdout
+
+
+def test_legacy_module_cli_help_does_not_run_demo() -> None:
+    result = subprocess.run(
+        [sys.executable, "async_multi_search.py", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "Run the async multi-provider search fallback chain" in result.stdout
+    assert "--max-results" in result.stdout
+    assert "AllProvidersFailedError" not in result.stderr

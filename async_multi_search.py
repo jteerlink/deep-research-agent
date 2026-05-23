@@ -20,6 +20,7 @@ DuckDuckGo needs no key and sits last as the always-available fallback
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import os
@@ -236,43 +237,32 @@ async def web_search(query: str, max_results: int = DEFAULT_MAX_RESULTS) -> list
     return await _default.search(query, max_results)
 
 
-def build_parser():
-    """Build a small compatibility CLI for the legacy module path."""
-    import argparse
-
+def _build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="async_multi_search",
-        description="Run the async multi-provider web search fallback chain.",
+        description="Run the async multi-provider search fallback chain.",
     )
     parser.add_argument(
         "query",
         nargs="?",
         default="what is retrieval augmented generation",
-        help="search query to run; defaults to the original demo query",
+        help="Search query to run when executing this module directly.",
     )
     parser.add_argument(
         "--max-results",
         type=int,
         default=DEFAULT_MAX_RESULTS,
-        help="maximum number of results to return from the first successful provider",
+        help="Maximum results requested from the first successful provider.",
     )
     return parser
 
 
-async def _run_cli(query: str, max_results: int) -> int:
-    """Execute a search for the compatibility CLI."""
-    for r in await web_search(query, max_results=max_results):
+async def _main() -> int:
+    logging.basicConfig(level=logging.INFO)
+    args = _build_cli_parser().parse_args()
+    for r in await web_search(args.query, max_results=args.max_results):
         print(f"[{r.provider}] {r.title}\n  {r.url}\n")
     return 0
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run the legacy module CLI without breaking ``--help`` behavior."""
-    logging.basicConfig(level=logging.INFO)
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    return asyncio.run(_run_cli(args.query, args.max_results))
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(asyncio.run(_main()))
