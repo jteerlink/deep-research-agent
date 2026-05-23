@@ -22,6 +22,7 @@ from deep_research_agent.graph import (
     LocalCheckpointStore,
     LocalResearchWorkflow,
     inspect_checkpoints,
+    resume_research,
     route_after_supervisor,
     run_research,
 )
@@ -204,3 +205,34 @@ def test_langgraph_json_src_entrypoint_reexports_packaged_graph() -> None:
 
     assert module.GRAPH_TOPOLOGY["main"] == ("supervisor",)
     assert hasattr(module.graph, "invoke") or callable(module.graph)
+
+
+def test_resume_preserves_checkpointed_evidence_and_artifacts(tmp_path) -> None:
+    checkpoint_dir = tmp_path / "checkpoints"
+    artifact_dir = tmp_path / "artifacts"
+    interrupted = asyncio.run(
+        run_research(
+            "acme research",
+            thread_id="artifact-thread",
+            checkpoint_dir=checkpoint_dir,
+            search=_mock_search,
+            require_review=True,
+            artifact_dir=artifact_dir,
+        )
+    )
+
+    resumed = asyncio.run(
+        resume_research(
+            "artifact-thread",
+            checkpoint_dir=checkpoint_dir,
+            approve_review=True,
+            artifact_dir=artifact_dir,
+        )
+    )
+
+    assert interrupted["evidence"]
+    assert resumed["status"] == "completed"
+    assert resumed["evidence"] == interrupted["evidence"]
+    assert resumed["findings"] == interrupted["findings"]
+    assert resumed["prospect_targets"] == interrupted["prospect_targets"]
+    assert Path(resumed["artifact_paths"]["json"]).exists()

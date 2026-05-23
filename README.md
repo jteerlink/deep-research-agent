@@ -37,6 +37,7 @@ For a deterministic offline run with mocked search evidence:
 python -m deep_research_agent run "find AI agencies" \
   --thread-id demo-thread \
   --require-review \
+  --artifact-dir artifacts/demo \
   --mock-result "Acme|https://example.com/acme|Acme builds reactivation tooling|duckduckgo"
 ```
 

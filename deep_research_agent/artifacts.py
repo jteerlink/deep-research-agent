@@ -126,7 +126,15 @@ def write_csv_artifact(*args: Any, **kwargs: Any) -> Path:
         with path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(
                 handle,
-                fieldnames=["name", "summary", "citation_ids", "metadata_json"],
+                fieldnames=[
+                    "name",
+                    "summary",
+                    "decision_maker_leads",
+                    "fit_rationale",
+                    "personalized_angles",
+                    "citation_ids",
+                    "metadata_json",
+                ],
             )
             writer.writeheader()
             for prospect in prospects:
@@ -134,6 +142,13 @@ def write_csv_artifact(*args: Any, **kwargs: Any) -> Path:
                     {
                         "name": prospect.name,
                         "summary": prospect.summary,
+                        "decision_maker_leads": ";".join(
+                            prospect.metadata.get("decision_maker_leads", ())
+                        ),
+                        "fit_rationale": prospect.metadata.get("fit_rationale", ""),
+                        "personalized_angles": ";".join(
+                            prospect.metadata.get("personalized_angles", ())
+                        ),
                         "citation_ids": ";".join(
                             citation.evidence_id for citation in prospect.citations
                         ),

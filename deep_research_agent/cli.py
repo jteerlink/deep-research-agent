@@ -43,6 +43,20 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _redact_secrets(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            if "key" in key.lower() and item:
+                redacted[key] = "<redacted>"
+            else:
+                redacted[key] = _redact_secrets(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_secrets(item) for item in value]
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="deep-research-agent",
@@ -56,6 +70,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit configuration as JSON instead of a short summary.",
     )
+    config_parser.add_argument(
+        "--show-secrets",
+        action="store_true",
+        help="Include raw API keys in config JSON output. Redacted by default.",
+    )
 
     subparsers.add_parser(
         "search-providers",
@@ -67,6 +86,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--thread-id", help="Durable thread id to use for checkpointing.")
     run_parser.add_argument(
         "--checkpoint-dir", help="Directory for local JSON checkpoints.", default=None
+    )
+    run_parser.add_argument(
+        "--artifact-dir", help="Directory for local JSON/CSV/Markdown prospect artifacts."
     )
     run_parser.add_argument(
         "--max-iterations",
@@ -96,6 +118,9 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("thread_id", help="Thread id to resume from checkpoint.")
     resume_parser.add_argument(
         "--checkpoint-dir", help="Directory for local JSON checkpoints.", default=None
+    )
+    resume_parser.add_argument(
+        "--artifact-dir", help="Directory for local JSON/CSV/Markdown prospect artifacts."
     )
     resume_parser.add_argument(
         "--approve",
@@ -149,7 +174,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "config":
         config = load_config()
         if args.json:
-            print(json.dumps(asdict(config), indent=2, default=str))
+            payload = asdict(config)
+            if not args.show_secrets:
+                payload = _redact_secrets(payload)
+            print(json.dumps(payload, indent=2, default=str))
         else:
             print(f"primary_provider={config.primary_provider.value}")
             print(f"primary_model={config.primary_model}")
@@ -184,6 +212,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     require_review=args.require_review,
                     max_iterations=args.max_iterations,
                     review_approved=args.approve,
+                    artifact_dir=args.artifact_dir,
                 )
             )
             _print_json(state)
@@ -209,7 +238,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.approve_review:
             state = asyncio.run(
                 resume_research(
-                    args.thread_id, checkpoint_dir=args.checkpoint_dir, approve_review=True
+                    args.thread_id,
+                    checkpoint_dir=args.checkpoint_dir,
+                    approve_review=True,
+                    artifact_dir=args.artifact_dir,
                 )
             )
             _print_json(state)

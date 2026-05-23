@@ -25,6 +25,9 @@ def test_prospect_and_citation_schemas_document_supported_semantics() -> None:
     assert citation["properties"]["purpose"]["enum"] == ["discovery", "fact"]
     assert prospect["required"] == ["organization", "confidence", "citations"]
     assert prospect["properties"]["citations"]["items"] == citation
+    assert "decision_maker_leads" in prospect["properties"]
+    assert "fit_rationale" in prospect["properties"]
+    assert "personalized_angles" in prospect["properties"]
     assert evidence["properties"]["evidence_type"]["enum"] == ["page_read", "snippet"]
 
 
@@ -134,6 +137,9 @@ def test_validate_prospect_accepts_mapping_shapes_and_normalized_evidence_aliase
             "website": "https://acme.example",
             "summary": "Autonomous research software for revenue teams.",
             "confidence": 0.82,
+            "decision_maker_leads": ["VP Marketing"],
+            "fit_rationale": "Revenue-team fit",
+            "personalized_angles": ["Autonomous research"],
             "citations": [
                 {
                     "evidence_id": "page-1",
@@ -149,6 +155,9 @@ def test_validate_prospect_accepts_mapping_shapes_and_normalized_evidence_aliase
 
     assert prospect.to_dict()["organization"] == "Acme"
     assert prospect.citations[0].field == "summary"
+    assert prospect.decision_maker_leads == ("VP Marketing",)
+    assert prospect.fit_rationale == "Revenue-team fit"
+    assert prospect.personalized_angles == ("Autonomous research",)
 
 
 def test_validate_prospects_rejects_uncited_or_out_of_range_records() -> None:

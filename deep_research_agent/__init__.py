@@ -23,6 +23,7 @@ from .graph import (
     resume_thread,
     run_query,
 )
+from .models import FallbackEvent, ModelRequest, ModelResponse, build_model_client
 from .prospects import CitationValidationError, Prospect, ProspectCitation
 from .search import SearchResult, web_search
 

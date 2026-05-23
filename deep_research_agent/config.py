@@ -24,8 +24,8 @@ class OllamaNativeConfig:
     This is intentionally distinct from Ollama's OpenAI-compatible `/v1` API.
     """
 
-    base_url: str = "http://localhost:11434"
-    model: str = "llama3.1"
+    base_url: str = "https://ollama.com/api"
+    model: str = "deepseek-v4-pro:cloud"
 
 
 @dataclass(frozen=True)
@@ -33,7 +33,7 @@ class OllamaOpenAIConfig:
     """Ollama OpenAI-compatible API configuration."""
 
     base_url: str = "http://localhost:11434/v1"
-    model: str = "llama3.1"
+    model: str = "deepseek-v4-pro:cloud"
     api_key: str = "ollama"
 
 
@@ -51,7 +51,7 @@ class CodexConfig:
     """Codex/OpenAI-compatible fallback configuration."""
 
     api_key: str = ""
-    model: str = "gpt-5.4-mini"
+    model: str = ""
     base_url: str = "https://api.openai.com/v1"
 
 
@@ -103,12 +103,37 @@ def _get_int(env: Mapping[str, str], key: str, default: int) -> int:
 
 
 def _provider(value: str) -> ModelProvider:
+    aliases = {
+        "ollama_openai_compatible": "ollama_openai",
+        "codex_openai_compatible": "codex",
+    }
     try:
-        return ModelProvider(value)
+        return ModelProvider(aliases.get(value, value))
     except ValueError as exc:
         allowed = ", ".join(provider.value for provider in ModelProvider)
         raise ValueError(f"DRA_PRIMARY_PROVIDER must be one of: {allowed}") from exc
 
+
+
+def _dotenv_values(path: str | os.PathLike[str] = ".env") -> dict[str, str]:
+    dotenv = os.fspath(path)
+    if not os.path.exists(dotenv):
+        return {}
+    values: dict[str, str] = {}
+    with open(dotenv, encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def _merged_environment() -> Mapping[str, str]:
+    merged = _dotenv_values()
+    merged.update(os.environ)
+    return merged
 
 def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
     """Load configuration from environment-like mapping.
@@ -117,17 +142,43 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
     to `os.environ`.
     """
 
-    source = os.environ if env is None else env
+    source = _merged_environment() if env is None else env
     return AppConfig(
-        primary_provider=_provider(_get(source, "DRA_PRIMARY_PROVIDER", "ollama_native")),
+        primary_provider=_provider(
+            _get(
+                source,
+                "DRA_PRIMARY_PROVIDER",
+                _get(source, "DEEP_RESEARCH_MODEL_PROVIDER", "ollama_native"),
+            )
+        ),
         ollama_native=OllamaNativeConfig(
-            base_url=_get(source, "DRA_OLLAMA_BASE_URL", "http://localhost:11434"),
-            model=_get(source, "DRA_OLLAMA_MODEL", "llama3.1"),
+            base_url=_get(
+                source,
+                "DRA_OLLAMA_BASE_URL",
+                _get(source, "OLLAMA_NATIVE_BASE_URL", "https://ollama.com/api"),
+            ),
+            model=_get(
+                source,
+                "DRA_OLLAMA_MODEL",
+                _get(source, "OLLAMA_NATIVE_MODEL", "deepseek-v4-pro:cloud"),
+            ),
         ),
         ollama_openai=OllamaOpenAIConfig(
-            base_url=_get(source, "DRA_OLLAMA_OPENAI_BASE_URL", "http://localhost:11434/v1"),
-            model=_get(source, "DRA_OLLAMA_OPENAI_MODEL", "llama3.1"),
-            api_key=_get(source, "DRA_OLLAMA_OPENAI_API_KEY", "ollama"),
+            base_url=_get(
+                source,
+                "DRA_OLLAMA_OPENAI_BASE_URL",
+                _get(source, "OLLAMA_OPENAI_BASE_URL", "http://localhost:11434/v1"),
+            ),
+            model=_get(
+                source,
+                "DRA_OLLAMA_OPENAI_MODEL",
+                _get(source, "OLLAMA_OPENAI_MODEL", "deepseek-v4-pro:cloud"),
+            ),
+            api_key=_get(
+                source,
+                "DRA_OLLAMA_OPENAI_API_KEY",
+                _get(source, "OLLAMA_OPENAI_API_KEY", "ollama"),
+            ),
         ),
         openai=OpenAIConfig(
             api_key=_get(source, "OPENAI_API_KEY", ""),
@@ -135,9 +186,11 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
             base_url=_get(source, "OPENAI_BASE_URL", "https://api.openai.com/v1"),
         ),
         codex=CodexConfig(
-            api_key=_get(source, "CODEX_API_KEY", ""),
-            model=_get(source, "CODEX_MODEL", "gpt-5.4-mini"),
-            base_url=_get(source, "CODEX_BASE_URL", "https://api.openai.com/v1"),
+            api_key=_get(source, "CODEX_API_KEY", _get(source, "CODEX_OPENAI_API_KEY", "")),
+            model=_get(source, "CODEX_MODEL", _get(source, "CODEX_OPENAI_MODEL", "")),
+            base_url=_get(
+                source, "CODEX_BASE_URL", _get(source, "CODEX_OPENAI_BASE_URL", "")
+            ),
         ),
         search=SearchConfig(
             max_results=_get_int(source, "DRA_MAX_SEARCH_RESULTS", 5),

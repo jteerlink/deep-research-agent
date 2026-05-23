@@ -14,3 +14,10 @@ def test_package_imports() -> None:
 
     assert callable(deep_research_agent.load_config)
     assert callable(web_search)
+
+
+def test_package_all_exports_are_importable() -> None:
+    import deep_research_agent
+
+    for name in deep_research_agent.__all__:
+        assert hasattr(deep_research_agent, name), name

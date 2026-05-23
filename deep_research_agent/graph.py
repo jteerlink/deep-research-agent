@@ -16,13 +16,15 @@ from collections.abc import Awaitable, Callable, Mapping, MutableMapping, Sequen
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, cast
 from uuid import uuid4
 
 from async_multi_search import SearchResult
 
+from .artifacts import write_research_artifacts
 from .config import ModelProvider, load_config
 from .models import ModelRequest, build_model_client
+from .prospects import ProspectCitation, ProspectRecord
 
 WorkflowStatus = Literal["completed", "interrupted"]
 ReviewStatus = Literal["pending", "approved"]
@@ -59,6 +61,9 @@ class ResearchState(TypedDict, total=False):
     fallback_events: list[dict[str, Any]]
     model_metadata: dict[str, Any]
     review_interrupt: dict[str, Any]
+    prospect_targets: list[dict[str, Any]]
+    artifact_paths: dict[str, str]
+    warnings: list[str]
     next_node: str
 
 
@@ -83,7 +88,7 @@ class ResearchCheckpoint:
     events: tuple[dict[str, Any], ...]
     fallback_metadata: dict[str, Any]
     checkpoint_path: Path
-    state: ResearchState = field(default_factory=dict)
+    state: ResearchState = field(default_factory=lambda: cast(ResearchState, {}))
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -151,7 +156,7 @@ class LocalCheckpointStore:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if payload.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
             raise ValueError(f"unsupported checkpoint schema for thread {thread_id!r}")
-        return dict(payload["state"])
+        return cast(ResearchState, dict(payload["state"]))
 
     def inspect(self, thread_id: str) -> dict[str, Any]:
         path = self.path_for(thread_id)
@@ -375,7 +380,7 @@ def _run_research_workflow(
     _synthesize_node(current)
     _review_node(current)
     checkpoint_store.save(str(current["thread_id"]), current)
-    return current
+    return cast(ResearchState, current)
 
 
 def route_after_supervisor(state: Mapping[str, Any]) -> str:
@@ -397,7 +402,7 @@ async def _call_search(
     if search is None:
         return []
     result = search(query, max_results)
-    if asyncio.iscoroutine(result):
+    if isinstance(result, Awaitable):
         return await result
     return result
 
@@ -418,6 +423,67 @@ def _evidence_from_results(results: Sequence[SearchResult]) -> list[dict[str, An
     return evidence
 
 
+def _prospects_from_evidence(evidence: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    prospects: list[dict[str, Any]] = []
+    for record in evidence:
+        evidence_id = str(record.get("id", ""))
+        organization = str(record.get("title") or record.get("url") or "Unknown prospect")
+        snippet = str(record.get("snippet") or "")
+        citation = ProspectCitation(
+            evidence_id=evidence_id,
+            claim=f"{organization} surfaced as a prospect discovery candidate.",
+            quote="",
+            purpose="discovery",
+            field="target_account_list",
+        )
+        prospect = ProspectRecord(
+            organization=organization,
+            website=str(record.get("url") or ""),
+            summary=snippet or f"Discovered candidate for the research query: {organization}.",
+            confidence=0.55 if record.get("source_type") == "snippet" else 0.75,
+            decision_maker_leads=("Founder/CEO", "Head of Growth"),
+            fit_rationale=(
+                "Candidate is included for discovery review based on cited search evidence; "
+                "confirm fit with page-read evidence before outreach."
+            ),
+            personalized_angles=(
+                snippet[:180] if snippet else "Use cited discovery evidence to tailor outreach.",
+            ),
+            citations=(citation,),
+            metadata={
+                "evidence_type": record.get("source_type", "snippet"),
+                "provider": record.get("provider", ""),
+            },
+        )
+        prospects.append(prospect.to_dict())
+    return prospects
+
+
+def _artifact_records(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    prospects = list(state.get("prospect_targets", []))
+    if prospects:
+        return prospects
+    return list(state.get("evidence", []))
+
+
+def _write_artifacts_if_requested(
+    state: MutableMapping[str, Any], artifact_dir: str | Path | None
+) -> None:
+    if artifact_dir is None:
+        return
+    output_dir = Path(artifact_dir) / str(state["thread_id"])
+    paths = write_research_artifacts(
+        _artifact_records(state),
+        output_dir,
+        metadata={"thread_id": state["thread_id"], "query": state.get("query", "")},
+    )
+    state["artifact_paths"] = {
+        "json": str(paths.json_path),
+        "csv": str(paths.csv_path),
+        "markdown": str(paths.markdown_path),
+    }
+
+
 async def run_research(
     query: str,
     *,
@@ -428,17 +494,31 @@ async def run_research(
     max_iterations: int = DEFAULT_MAX_RESEARCH_ITERATIONS,
     review_approved: bool = False,
     existing_state: Mapping[str, Any] | None = None,
+    artifact_dir: str | Path | None = None,
 ) -> ResearchState:
     """Run the compatibility async research workflow used by G003 tests."""
 
     store = LocalCheckpointStore(checkpoint_dir)
+    selected_thread_id: str
     if existing_state and not thread_id:
-        selected_thread_id = str(existing_state.get("thread_id"))
+        selected_thread_id = str(existing_state.get("thread_id") or f"thread-{uuid4()}")
     else:
-        selected_thread_id = thread_id
-    selected_thread_id = selected_thread_id or f"thread-{uuid4()}"
+        selected_thread_id = thread_id or f"thread-{uuid4()}"
+    state: dict[str, Any]
+    if existing_state and review_approved:
+        state = dict(existing_state)
+        state.setdefault("events", [])
+        state["thread_id"] = selected_thread_id
+        state["status"] = "completed"
+        state["sufficient"] = bool(state.get("sufficient", True))
+        _append_event(state, "review", "review_resumed")
+        _append_event(state, "main", "workflow_completed")
+        _write_artifacts_if_requested(state, artifact_dir)
+        store.save(selected_thread_id, state)
+        return cast(ResearchState, state)
+
     events = list(existing_state.get("events", [])) if existing_state else []
-    state: ResearchState = {
+    state = {
         "query": query,
         "thread_id": selected_thread_id,
         "events": events,
@@ -447,6 +527,8 @@ async def run_research(
         "evidence": [],
         "findings": [],
         "fallback_events": [],
+        "prospect_targets": [],
+        "warnings": [],
     }
     _append_event(state, "main", "main_started")
 
@@ -455,6 +537,7 @@ async def run_research(
         results = await _call_search(search, query, max_results=5)
         state["evidence"] = _evidence_from_results(results)
         state["findings"] = list(state["evidence"])
+        state["prospect_targets"] = _prospects_from_evidence(state["evidence"])
         state["iteration"] = int(state.get("iteration", 0)) + 1
         model_response = await build_model_client().invoke(
             ModelRequest(
@@ -471,6 +554,9 @@ async def run_research(
             _append_event(state, "supervisor", "sufficiency_routed")
             break
 
+    if not state["evidence"]:
+        state["warnings"].append("No search evidence was captured; prospect exports are empty.")
+
     if require_review and not review_approved:
         state["status"] = "interrupted"
         state["review_interrupt"] = {"thread_id": selected_thread_id, "reason": "review_required"}
@@ -480,8 +566,9 @@ async def run_research(
         if review_approved or existing_state:
             _append_event(state, "review", "review_resumed")
         _append_event(state, "main", "workflow_completed")
+    _write_artifacts_if_requested(state, artifact_dir)
     store.save(selected_thread_id, state)
-    return state
+    return cast(ResearchState, state)
 
 
 async def resume_research(
@@ -490,6 +577,7 @@ async def resume_research(
     checkpoint_dir: str | Path | None = None,
     approve_review: bool = True,
     search: SearchFn | None = None,
+    artifact_dir: str | Path | None = None,
 ) -> ResearchState:
     """Resume a compatibility async workflow from a checkpoint."""
 
@@ -506,6 +594,7 @@ async def resume_research(
         max_iterations=int(state.get("max_iterations", state.get("iteration", 1)) or 1),
         review_approved=approve_review,
         existing_state=state,
+        artifact_dir=artifact_dir,
     )
 
 

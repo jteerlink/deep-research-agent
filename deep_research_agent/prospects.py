@@ -170,6 +170,9 @@ def prospect_schema() -> dict[str, Any]:
             "website": {"type": "string"},
             "summary": {"type": "string"},
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "decision_maker_leads": {"type": "array", "items": {"type": "string"}},
+            "fit_rationale": {"type": "string"},
+            "personalized_angles": {"type": "array", "items": {"type": "string"}},
             "citations": {"type": "array", "items": citation},
         },
     }
@@ -245,6 +248,9 @@ def _coerce_prospect(value: ProspectRecord | Prospect | Mapping[str, Any]) -> Pr
         website=str(value.get("website", "")),
         summary=str(value.get("summary", "")),
         confidence=float(value.get("confidence", 1.0)),
+        decision_maker_leads=tuple(str(item) for item in value.get("decision_maker_leads", ())),
+        fit_rationale=str(value.get("fit_rationale", "")),
+        personalized_angles=tuple(str(item) for item in value.get("personalized_angles", ())),
         citations=citations,
         metadata=dict(value.get("metadata", {})),
     )
@@ -252,7 +258,8 @@ def _coerce_prospect(value: ProspectRecord | Prospect | Mapping[str, Any]) -> Pr
 
 def validate_prospect(
     prospect: ProspectRecord | Prospect | Mapping[str, Any],
-    evidence_records: Iterable[EvidenceReference | EvidenceRecord | Mapping[str, Any]],
+    evidence_records: Iterable[EvidenceReference | EvidenceRecord | Mapping[str, Any]]
+    | Mapping[str, EvidenceReference | EvidenceRecord | Mapping[str, Any]],
 ) -> ProspectRecord:
     evidence = normalize_evidence_catalog(evidence_records)
     record = _coerce_prospect(prospect)
@@ -267,9 +274,10 @@ def validate_prospect(
 
 def validate_prospects(
     prospects: Sequence[ProspectRecord | Prospect | Mapping[str, Any]],
-    evidence_records: Iterable[EvidenceReference | EvidenceRecord | Mapping[str, Any]],
+    evidence_records: Iterable[EvidenceReference | EvidenceRecord | Mapping[str, Any]]
+    | Mapping[str, EvidenceReference | EvidenceRecord | Mapping[str, Any]],
 ) -> tuple[ProspectRecord, ...]:
-    evidence = tuple(evidence_records)
+    evidence = normalize_evidence_catalog(evidence_records)
     return tuple(validate_prospect(prospect, evidence) for prospect in prospects)
 
 

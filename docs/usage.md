@@ -15,7 +15,7 @@ writers without requiring live Ollama, OpenAI/Codex, or paid search credentials.
 python -m pip install -e '.[dev]'
 cp .env.example .env
 python -m deep_research_agent --help
-python -m deep_research_agent config --json
+python -m deep_research_agent config --json  # API keys are redacted by default
 python -m deep_research_agent search-providers
 ```
 
@@ -63,12 +63,14 @@ python -m deep_research_agent run \
   "AI agency lead reactivation targets" \
   --thread-id demo-prospect-thread \
   --checkpoint-dir "$CHECKPOINT_DIR" \
+  --artifact-dir artifacts/demo \
   --require-review \
   --mock-result "Acme Dental|https://example.com/acme|Growing DSO with reactivation need|duckduckgo"
 
 python -m deep_research_agent resume \
   demo-prospect-thread \
   --checkpoint-dir "$CHECKPOINT_DIR" \
+  --artifact-dir artifacts/demo \
   --approve-review
 
 python -m deep_research_agent inspect \
@@ -82,7 +84,7 @@ Expected results:
   evidence from the mocked search result, model metadata, and review interrupt
   details.
 - `resume --approve-review` returns JSON with `status: "completed"` for the
-  same thread id.
+  same thread id, preserving checkpointed evidence and prospect targets.
 - `inspect --thread-id` returns the persisted checkpoint state from the same
   local JSON checkpoint file.
 
@@ -120,15 +122,16 @@ inferences.
 Run this only after credentials are present in `.env` or exported in the shell:
 
 ```bash
-python -m deep_research_agent config --json
+python -m deep_research_agent config --json  # API keys are redacted by default
 python -m async_multi_search "AI agency lead reactivation targets" --max-results 3
 ```
 
 Then run a constrained CLI workflow with a real search result copied into
 `--mock-result`, or call the package search wrappers from a small script. Live
 model transports are still represented by deterministic metadata stubs in the
-current G003 foundation; a later goal should replace those stubs with real
-Ollama/Codex/OpenAI calls behind the same fallback event contract.
+current G003 foundation; the CLI redacts configured API keys by default and a
+later goal should replace those stubs with real Ollama/Codex/OpenAI calls behind
+the same fallback event contract.
 
 ## Verification commands
 
@@ -136,7 +139,7 @@ Ollama/Codex/OpenAI calls behind the same fallback event contract.
 python -m pytest -q
 python -m ruff check .
 python -m deep_research_agent --help
-python -m deep_research_agent config --json
+python -m deep_research_agent config --json  # API keys are redacted by default
 ```
 
 These commands are the required offline gate before marking implementation work

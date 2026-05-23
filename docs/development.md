@@ -8,8 +8,8 @@
 4. Run CLI help once the CLI module is available:
    `python -m deep_research_agent --help`.
 5. Exercise the local G003 run/resume/inspect flow without provider credentials:
-   `python -m deep_research_agent run "demo query" --thread-id demo-thread --require-review --mock-result "Demo|https://example.com|Snippet|duckduckgo"`,
-   `python -m deep_research_agent resume demo-thread --approve-review`, and
+   `python -m deep_research_agent run "demo query" --thread-id demo-thread --artifact-dir artifacts/demo --require-review --mock-result "Demo|https://example.com|Snippet|duckduckgo"`,
+   `python -m deep_research_agent resume demo-thread --artifact-dir artifacts/demo --approve-review`, and
    `python -m deep_research_agent inspect --thread-id demo-thread`.
 6. Run a LangGraph dev server from the repository root after dependencies are
    installed: `langgraph dev`.

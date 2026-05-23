@@ -152,6 +152,9 @@ def test_artifact_payload_and_writers_preserve_schema_and_citations(tmp_path) ->
         {
             "name": "Acme",
             "summary": "Likely buyer",
+            "decision_maker_leads": "",
+            "fit_rationale": "",
+            "personalized_angles": "",
             "citation_ids": "ev_1",
             "metadata_json": '{"segment": "midmarket"}',
         }

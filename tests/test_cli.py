@@ -42,3 +42,17 @@ def test_legacy_module_cli_help_does_not_run_demo() -> None:
     assert "Run the async multi-provider search fallback chain" in result.stdout
     assert "--max-results" in result.stdout
     assert "AllProvidersFailedError" not in result.stderr
+
+
+def test_cli_config_json_redacts_api_keys() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "deep_research_agent", "config", "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={"OPENAI_API_KEY": "secret-openai", "CODEX_API_KEY": "secret-codex"},
+    )
+
+    assert "secret-openai" not in result.stdout
+    assert "secret-codex" not in result.stdout
+    assert "<redacted>" in result.stdout

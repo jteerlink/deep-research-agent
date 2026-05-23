@@ -9,9 +9,9 @@ def test_default_config_is_ollama_native() -> None:
     config = load_config({})
 
     assert config.primary_provider is ModelProvider.OLLAMA_NATIVE
-    assert config.ollama_native.base_url == "http://localhost:11434"
+    assert config.ollama_native.base_url == "https://ollama.com/api"
     assert config.ollama_openai.base_url == "http://localhost:11434/v1"
-    assert config.primary_model == "llama3.1"
+    assert config.primary_model == "deepseek-v4-pro:cloud"
 
 
 def test_openai_and_codex_fallbacks_are_distinct() -> None:
@@ -34,3 +34,21 @@ def test_openai_and_codex_fallbacks_are_distinct() -> None:
 def test_invalid_provider_reports_allowed_values() -> None:
     with pytest.raises(ValueError, match="ollama_native"):
         load_config({"DRA_PRIMARY_PROVIDER": "hosted-ui"})
+
+
+def test_deep_research_provider_aliases_map_to_root_config() -> None:
+    config = load_config({"DEEP_RESEARCH_MODEL_PROVIDER": "codex_openai_compatible"})
+
+    assert config.primary_provider is ModelProvider.CODEX
+
+
+def test_dotenv_values_are_loaded_without_overriding_explicit_env(tmp_path, monkeypatch) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("DRA_OLLAMA_MODEL=from-dotenv\nOPENAI_API_KEY=secret-from-dotenv\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DRA_OLLAMA_MODEL", "from-shell")
+
+    config = load_config()
+
+    assert config.ollama_native.model == "from-shell"
+    assert config.openai.api_key == "secret-from-dotenv"
