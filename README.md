@@ -10,7 +10,11 @@ local G003 workflow runner with durable thread checkpoints.
 ```bash
 cp .env.example .env
 python -m deep_research_agent --help
+python -m deep_research_agent config --json
 ```
+
+See [docs/usage.md](docs/usage.md) for offline smoke, optional live smoke,
+checkpoint/resume, and artifact examples.
 
 ## Local G003 workflow
 
@@ -25,6 +29,15 @@ Start a run and stop at the review interrupt:
 
 ```bash
 python -m deep_research_agent run "find AI agencies" --thread-id demo-thread
+```
+
+For a deterministic offline run with mocked search evidence:
+
+```bash
+python -m deep_research_agent run "find AI agencies" \
+  --thread-id demo-thread \
+  --require-review \
+  --mock-result "Acme|https://example.com/acme|Acme builds reactivation tooling|duckduckgo"
 ```
 
 Inspect the durable JSON checkpoint:
