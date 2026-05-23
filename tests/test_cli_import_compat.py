@@ -49,3 +49,16 @@ def test_legacy_module_help_does_not_run_search() -> None:
     assert "usage: async_multi_search" in completed.stdout
     assert "--max-results" in completed.stdout
     assert completed.stderr == ""
+
+
+def test_package_module_help_uses_cli_entrypoint() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "deep_research_agent", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0
+    assert "usage: deep-research-agent" in completed.stdout
+    assert completed.stderr == ""

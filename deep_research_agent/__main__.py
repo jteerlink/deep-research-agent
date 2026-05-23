@@ -1,4 +1,4 @@
-"""Run `python -m deep_research_agent`."""
+"""Run the Deep Research Agent package CLI with ``python -m``."""
 
 from .cli import main
 

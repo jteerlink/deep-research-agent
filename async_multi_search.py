@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+import os
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import httpx
@@ -166,9 +167,9 @@ class DuckDuckGoProvider(SearchProvider):
 
     def _sync_search(self, query, max_results):
         try:
-            from ddgs import DDGS  # type: ignore[import-not-found]  # current package
+            from ddgs import DDGS  # type: ignore[import-not-found]  # noqa: I001
         except ImportError:
-            from duckduckgo_search import DDGS  # type: ignore[import-not-found]  # legacy name
+            from duckduckgo_search import DDGS  # type: ignore[import-not-found]  # noqa: I001
         with DDGS() as ddgs:
             return list(ddgs.text(query, max_results=max_results))
 
