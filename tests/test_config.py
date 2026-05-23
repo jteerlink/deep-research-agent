@@ -52,3 +52,17 @@ def test_dotenv_values_are_loaded_without_overriding_explicit_env(tmp_path, monk
 
     assert config.ollama_native.model == "from-shell"
     assert config.openai.api_key == "secret-from-dotenv"
+
+
+def test_deep_research_provider_takes_precedence_over_legacy_alias() -> None:
+    config = load_config(
+        {
+            "DEEP_RESEARCH_MODEL_PROVIDER": "openai",
+            "DRA_PRIMARY_PROVIDER": "codex",
+            "OLLAMA_NATIVE_MODEL": "canonical-model",
+            "DRA_OLLAMA_MODEL": "legacy-model",
+        }
+    )
+
+    assert config.primary_provider is ModelProvider.OPENAI
+    assert config.ollama_native.model == "canonical-model"

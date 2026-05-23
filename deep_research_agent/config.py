@@ -147,37 +147,37 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         primary_provider=_provider(
             _get(
                 source,
-                "DRA_PRIMARY_PROVIDER",
-                _get(source, "DEEP_RESEARCH_MODEL_PROVIDER", "ollama_native"),
+                "DEEP_RESEARCH_MODEL_PROVIDER",
+                _get(source, "DRA_PRIMARY_PROVIDER", "ollama_native"),
             )
         ),
         ollama_native=OllamaNativeConfig(
             base_url=_get(
                 source,
-                "DRA_OLLAMA_BASE_URL",
-                _get(source, "OLLAMA_NATIVE_BASE_URL", "https://ollama.com/api"),
+                "OLLAMA_NATIVE_BASE_URL",
+                _get(source, "DRA_OLLAMA_BASE_URL", "https://ollama.com/api"),
             ),
             model=_get(
                 source,
-                "DRA_OLLAMA_MODEL",
-                _get(source, "OLLAMA_NATIVE_MODEL", "deepseek-v4-pro:cloud"),
+                "OLLAMA_NATIVE_MODEL",
+                _get(source, "DRA_OLLAMA_MODEL", "deepseek-v4-pro:cloud"),
             ),
         ),
         ollama_openai=OllamaOpenAIConfig(
             base_url=_get(
                 source,
-                "DRA_OLLAMA_OPENAI_BASE_URL",
-                _get(source, "OLLAMA_OPENAI_BASE_URL", "http://localhost:11434/v1"),
+                "OLLAMA_OPENAI_BASE_URL",
+                _get(source, "DRA_OLLAMA_OPENAI_BASE_URL", "http://localhost:11434/v1"),
             ),
             model=_get(
                 source,
-                "DRA_OLLAMA_OPENAI_MODEL",
-                _get(source, "OLLAMA_OPENAI_MODEL", "deepseek-v4-pro:cloud"),
+                "OLLAMA_OPENAI_MODEL",
+                _get(source, "DRA_OLLAMA_OPENAI_MODEL", "deepseek-v4-pro:cloud"),
             ),
             api_key=_get(
                 source,
-                "DRA_OLLAMA_OPENAI_API_KEY",
-                _get(source, "OLLAMA_OPENAI_API_KEY", "ollama"),
+                "OLLAMA_OPENAI_API_KEY",
+                _get(source, "DRA_OLLAMA_OPENAI_API_KEY", "ollama"),
             ),
         ),
         openai=OpenAIConfig(

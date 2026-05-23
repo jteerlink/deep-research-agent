@@ -192,6 +192,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "run":
         if args.json:
+            if args.artifact_dir:
+                state = asyncio.run(
+                    run_research(
+                        args.query,
+                        thread_id=args.thread_id,
+                        checkpoint_dir=args.checkpoint_dir,
+                        require_review=not args.approve,
+                        max_iterations=args.max_iterations,
+                        review_approved=args.approve,
+                        artifact_dir=args.artifact_dir,
+                    )
+                )
+                _print_json(state)
+                return 0
             result = run_query(
                 args.query,
                 thread_id=args.thread_id,
@@ -219,7 +233,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         checkpoint = run_research_workflow(
-            args.query, thread_id=args.thread_id, checkpoint_dir=args.checkpoint_dir
+            args.query,
+            thread_id=args.thread_id,
+            checkpoint_dir=args.checkpoint_dir,
+            artifact_dir=args.artifact_dir,
         )
         _print_json(checkpoint.to_dict())
         return 0
@@ -235,7 +252,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json(result)
             return 0
 
-        if args.approve_review:
+        if approve:
             state = asyncio.run(
                 resume_research(
                     args.thread_id,
@@ -247,7 +264,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json(state)
             return 0
 
-        checkpoint = resume_research_workflow(args.thread_id, checkpoint_dir=args.checkpoint_dir)
+        checkpoint = resume_research_workflow(
+            args.thread_id, checkpoint_dir=args.checkpoint_dir, artifact_dir=args.artifact_dir
+        )
         _print_json(checkpoint.to_dict())
         return 0
 

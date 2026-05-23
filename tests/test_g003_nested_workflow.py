@@ -236,3 +236,53 @@ def test_resume_preserves_checkpointed_evidence_and_artifacts(tmp_path) -> None:
     assert resumed["findings"] == interrupted["findings"]
     assert resumed["prospect_targets"] == interrupted["prospect_targets"]
     assert Path(resumed["artifact_paths"]["json"]).exists()
+
+
+def test_cli_approve_alias_writes_artifacts(tmp_path) -> None:
+    checkpoint_dir = tmp_path / "checkpoints"
+    artifact_dir = tmp_path / "artifacts"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "deep_research_agent",
+            "run",
+            "acme research",
+            "--thread-id",
+            "approve-thread",
+            "--checkpoint-dir",
+            str(checkpoint_dir),
+            "--artifact-dir",
+            str(artifact_dir),
+            "--require-review",
+            "--mock-result",
+            "Acme|https://example.com/acme|Acme builds research tools|duckduckgo",
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    resumed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "deep_research_agent",
+            "resume",
+            "approve-thread",
+            "--checkpoint-dir",
+            str(checkpoint_dir),
+            "--artifact-dir",
+            str(artifact_dir),
+            "--approve",
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(resumed.stdout)
+    assert payload["status"] == "completed"
+    assert Path(payload["artifact_paths"]["json"]).exists()

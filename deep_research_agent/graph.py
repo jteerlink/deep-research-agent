@@ -688,18 +688,33 @@ def run_research_workflow(
     *,
     thread_id: str | None = None,
     checkpoint_dir: str | Path | None = None,
+    artifact_dir: str | Path | None = None,
 ) -> ResearchCheckpoint:
     state = asyncio.run(
-        run_research(query, thread_id=thread_id, checkpoint_dir=checkpoint_dir, require_review=True)
+        run_research(
+            query,
+            thread_id=thread_id,
+            checkpoint_dir=checkpoint_dir,
+            require_review=True,
+            artifact_dir=artifact_dir,
+        )
     )
     return _checkpoint_from_state(state, checkpoint_dir)
 
 
 def resume_research_workflow(
-    thread_id: str, *, checkpoint_dir: str | Path | None = None
+    thread_id: str,
+    *,
+    checkpoint_dir: str | Path | None = None,
+    artifact_dir: str | Path | None = None,
 ) -> ResearchCheckpoint:
     state = asyncio.run(
-        resume_research(thread_id, checkpoint_dir=checkpoint_dir, approve_review=True)
+        resume_research(
+            thread_id,
+            checkpoint_dir=checkpoint_dir,
+            approve_review=True,
+            artifact_dir=artifact_dir,
+        )
     )
     return _checkpoint_from_state(state, checkpoint_dir)
 
