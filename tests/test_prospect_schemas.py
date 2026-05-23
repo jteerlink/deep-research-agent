@@ -53,7 +53,7 @@ def test_page_read_fact_citation_requires_quote_present_in_evidence() -> None:
 
 
 @pytest.mark.parametrize(
-    (citation, match),
+    ("citation", "match"),
     [
         (
             ProspectCitation(evidence_id="result-1", claim="Acme serves revenue teams."),
