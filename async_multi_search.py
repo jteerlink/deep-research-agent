@@ -25,7 +25,6 @@ import asyncio
 import logging
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 import httpx
