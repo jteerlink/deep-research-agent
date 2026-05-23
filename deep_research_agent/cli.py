@@ -43,7 +43,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--thread-id", help="Optional durable thread id to use.")
     run_parser.add_argument(
         "--checkpoint-dir",
-        help="Directory for local JSON checkpoints (default: DEEP_RESEARCH_CHECKPOINT_DIR or .deep_research_agent/checkpoints).",
+        help=(
+            "Directory for local JSON checkpoints "
+            "(default: DEEP_RESEARCH_CHECKPOINT_DIR or .deep_research_agent/checkpoints)."
+        ),
     )
     run_parser.add_argument(
         "--require-review",
@@ -62,7 +65,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     resume_parser = subparsers.add_parser("resume", help="Resume a local research workflow thread.")
     resume_parser.add_argument("thread_id", help="Durable thread id to resume.")
-    resume_parser.add_argument("--checkpoint-dir", help="Directory containing local JSON checkpoints.")
+    resume_parser.add_argument(
+        "--checkpoint-dir", help="Directory containing local JSON checkpoints."
+    )
     resume_parser.add_argument(
         "--approve-review",
         action="store_true",
@@ -78,7 +83,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     inspect_parser = subparsers.add_parser("inspect", help="Inspect local research checkpoints.")
     inspect_parser.add_argument("--thread-id", help="Optional thread id to inspect.")
-    inspect_parser.add_argument("--checkpoint-dir", help="Directory containing local JSON checkpoints.")
+    inspect_parser.add_argument(
+        "--checkpoint-dir", help="Directory containing local JSON checkpoints."
+    )
     return parser
 
 

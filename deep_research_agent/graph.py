@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from async_multi_search import SearchResult
 
-from .config import AppConfig, load_config
+from .config import AppConfig
 from .evidence import SearchFailure, normalize_search_results
 from .models import FallbackEvent, ModelClient, ModelRequest, build_model_client
 
@@ -137,7 +137,9 @@ class LocalCheckpointStore:
                     continue
                 checkpoints.append(
                     {
-                        "thread_id": payload.get("thread_id") or state.get("thread_id") or path.stem,
+                        "thread_id": (
+                            payload.get("thread_id") or state.get("thread_id") or path.stem
+                        ),
                         "path": str(path),
                         "status": state.get("status"),
                         "iteration": state.get("iteration", 0),
@@ -164,7 +166,9 @@ def _jsonable_state(state: Mapping[str, Any]) -> dict[str, Any]:
     return {str(key): convert(value) for key, value in state.items() if not callable(value)}
 
 
-def _ensure_state(state: Mapping[str, Any] | None = None, *, query: str | None = None) -> ResearchState:
+def _ensure_state(
+    state: Mapping[str, Any] | None = None, *, query: str | None = None
+) -> ResearchState:
     current: ResearchState = dict(state or {})
     if query is not None:
         current["query"] = query
@@ -191,6 +195,14 @@ def main_node(state: ResearchState) -> ResearchState:
     return current
 
 
+def _finish_or_review(state: ResearchState) -> RouteName:
+    return (
+        "review"
+        if state.get("review_required") and not state.get("review_approved")
+        else "finish"
+    )
+
+
 def route_after_supervisor(state: ResearchState) -> RouteName:
     """Route to researcher until evidence is sufficient or max iterations hit."""
 
@@ -199,9 +211,9 @@ def route_after_supervisor(state: ResearchState) -> RouteName:
     iteration = int(state.get("iteration", 0))
     max_iterations = int(state.get("max_iterations", DEFAULT_MAX_ITERATIONS))
     if evidence_count >= min_evidence:
-        return "review" if state.get("review_required") and not state.get("review_approved") else "finish"
+        return _finish_or_review(state)
     if iteration >= max_iterations:
-        return "review" if state.get("review_required") and not state.get("review_approved") else "finish"
+        return _finish_or_review(state)
     return "researcher"
 
 
@@ -435,12 +447,16 @@ class LocalCompiledGraph:
         self.workflow = workflow or LocalResearchWorkflow()
         self.topology = deepcopy(GRAPH_TOPOLOGY)
 
-    async def ainvoke(self, state: Mapping[str, Any], config: Mapping[str, Any] | None = None) -> ResearchState:
+    async def ainvoke(
+        self, state: Mapping[str, Any], config: Mapping[str, Any] | None = None
+    ) -> ResearchState:
         configurable = dict((config or {}).get("configurable", {})) if config else {}
         thread_id = configurable.get("thread_id") or state.get("thread_id")
         return await self.workflow.arun(state, thread_id=thread_id)
 
-    def invoke(self, state: Mapping[str, Any], config: Mapping[str, Any] | None = None) -> ResearchState:
+    def invoke(
+        self, state: Mapping[str, Any], config: Mapping[str, Any] | None = None
+    ) -> ResearchState:
         return asyncio.run(self.ainvoke(state, config=config))
 
     def get_graph(self) -> dict[str, tuple[str, ...]]:

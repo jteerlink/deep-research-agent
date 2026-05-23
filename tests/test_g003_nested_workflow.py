@@ -8,7 +8,15 @@ import sys
 from pathlib import Path
 
 from async_multi_search import SearchResult
-from deep_research_agent.config import AppConfig, CodexConfig, ModelProvider, OllamaNativeConfig, OllamaOpenAIConfig, OpenAIConfig, SearchConfig
+from deep_research_agent.config import (
+    AppConfig,
+    CodexConfig,
+    ModelProvider,
+    OllamaNativeConfig,
+    OllamaOpenAIConfig,
+    OpenAIConfig,
+    SearchConfig,
+)
 from deep_research_agent.graph import (
     GRAPH_TOPOLOGY,
     LocalCheckpointStore,
@@ -25,7 +33,14 @@ ROOT = Path(__file__).resolve().parents[1]
 async def _mock_search(query: str, max_results: int):
     assert query == "acme research"
     assert max_results >= 1
-    return [SearchResult("Acme", "https://example.com/acme", "Acme builds research tools", provider="duckduckgo")]
+    return [
+        SearchResult(
+            "Acme",
+            "https://example.com/acme",
+            "Acme builds research tools",
+            provider="duckduckgo",
+        )
+    ]
 
 
 def test_mocked_graph_smoke_collects_evidence_and_checkpoints(tmp_path) -> None:
@@ -47,7 +62,10 @@ def test_mocked_graph_smoke_collects_evidence_and_checkpoints(tmp_path) -> None:
 
 
 def test_supervisor_delegates_until_sufficient_or_max_iteration() -> None:
-    assert route_after_supervisor({"evidence": [], "iteration": 0, "max_iterations": 2}) == "researcher"
+    assert (
+        route_after_supervisor({"evidence": [], "iteration": 0, "max_iterations": 2})
+        == "researcher"
+    )
     assert route_after_supervisor({"evidence": [{"id": "ev_1"}], "iteration": 1}) == "finish"
     assert route_after_supervisor({"evidence": [], "iteration": 2, "max_iterations": 2}) == "finish"
     assert (
