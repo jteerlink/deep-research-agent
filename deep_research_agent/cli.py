@@ -1,64 +1,59 @@
-"""Command line interface for Deep Research Agent foundation utilities."""
+"""Command-line interface for the deep research agent foundation."""
 
 from __future__ import annotations
 
 import argparse
-import asyncio
-from collections.abc import Sequence
+import json
+from dataclasses import asdict
+from typing import Sequence
 
-from . import __version__
+from .config import load_config
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the CLI parser without importing optional provider clients."""
     parser = argparse.ArgumentParser(
         prog="deep-research-agent",
-        description="Foundation CLI for Deep Research Agent utilities.",
+        description="Local-first deep research agent foundation utilities.",
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-
     subparsers = parser.add_subparsers(dest="command")
 
-    search_parser = subparsers.add_parser(
-        "search",
-        help="run the async multi-provider web search fallback chain",
-    )
-    search_parser.add_argument("query", help="search query to run")
-    search_parser.add_argument(
-        "--max-results",
-        type=int,
-        default=5,
-        help="maximum number of results to return from the first successful provider",
+    config_parser = subparsers.add_parser("config", help="Print resolved configuration.")
+    config_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit configuration as JSON instead of a short summary.",
     )
 
+    subparsers.add_parser(
+        "search-providers",
+        help="List async_multi_search.py provider order and required environment keys.",
+    )
     return parser
 
 
-async def _run_search(query: str, max_results: int) -> int:
-    from .search import web_search
-
-    results = await web_search(query, max_results=max_results)
-    for result in results:
-        print(f"[{result.provider}] {result.title}")
-        if result.url:
-            print(f"  {result.url}")
-        if result.content:
-            print(f"  {result.content}")
-        print()
-    return 0
-
-
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the CLI and return a process exit code."""
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.command == "search":
-        return asyncio.run(_run_search(args.query, args.max_results))
+    if args.command == "config":
+        config = load_config()
+        if args.json:
+            print(json.dumps(asdict(config), indent=2, default=str))
+        else:
+            print(f"primary_provider={config.primary_provider.value}")
+            print(f"primary_model={config.primary_model}")
+        return 0
+
+    if args.command == "search-providers":
+        from async_multi_search import AsyncMultiProviderSearch
+
+        for provider in AsyncMultiProviderSearch().providers:
+            print(f"{provider.name}: {provider.env_key or 'no key required'}")
+        return 0
 
     parser.print_help()
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     raise SystemExit(main())

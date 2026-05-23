@@ -1,24 +1,29 @@
-"""Package-native access to the legacy async multi-provider search helpers.
-
-``async_multi_search.py`` remains importable for existing users. New package code
-can import from ``deep_research_agent.search`` while sharing the same
-implementation and behavior.
-"""
+"""Package-level accessors for the legacy async_multi_search module."""
 
 from __future__ import annotations
 
-from async_multi_search import (
+from async_multi_search import (  # noqa: F401
     AllProvidersFailedError,
     AsyncMultiProviderSearch,
+    BraveProvider,
+    DuckDuckGoProvider,
+    ExaProvider,
     SearchProvider,
     SearchResult,
+    SerperProvider,
+    TavilyProvider,
     web_search,
 )
 
 __all__ = [
     "AllProvidersFailedError",
     "AsyncMultiProviderSearch",
+    "BraveProvider",
+    "DuckDuckGoProvider",
+    "ExaProvider",
     "SearchProvider",
     "SearchResult",
+    "SerperProvider",
+    "TavilyProvider",
     "web_search",
 ]
