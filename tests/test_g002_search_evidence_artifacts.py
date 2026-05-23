@@ -174,8 +174,14 @@ def test_artifact_writers_emit_json_csv_and_markdown(tmp_path) -> None:
         citations=(Citation(evidence_id="ev_known", claim="role"),),
     )
 
-    json_path = write_json_artifact(tmp_path / "artifact.json", {"evidence": evidence, "prospects": [prospect]})
-    csv_path = write_csv_artifact(tmp_path / "evidence.csv", [record.to_dict() for record in evidence])
+    json_path = write_json_artifact(
+        tmp_path / "artifact.json",
+        {"evidence": evidence, "prospects": [prospect]},
+    )
+    csv_path = write_csv_artifact(
+        tmp_path / "evidence.csv",
+        [record.to_dict() for record in evidence],
+    )
     md_path = write_markdown_artifact(
         tmp_path / "artifact.md",
         title="Research Artifact",
