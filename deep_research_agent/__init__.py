@@ -9,7 +9,17 @@ from .config import (
     OpenAIConfig,
     load_config,
 )
-from .search import SearchResult, web_search
+from .search import (
+    Citation,
+    CitationValidationError,
+    EvidenceKind,
+    EvidenceRecord,
+    Prospect,
+    SearchEvidenceArtifact,
+    SearchResult,
+    collect_search_evidence,
+    web_search,
+)
 
 __all__ = [
     "AppConfig",
@@ -18,7 +28,14 @@ __all__ = [
     "OllamaNativeConfig",
     "OllamaOpenAIConfig",
     "OpenAIConfig",
+    "Citation",
+    "CitationValidationError",
+    "EvidenceKind",
+    "EvidenceRecord",
+    "Prospect",
+    "SearchEvidenceArtifact",
     "SearchResult",
+    "collect_search_evidence",
     "load_config",
     "web_search",
 ]
