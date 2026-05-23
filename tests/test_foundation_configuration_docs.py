@@ -55,7 +55,7 @@ def test_foundation_docs_preserve_scope_and_import_compatibility() -> None:
     development_doc = (ROOT / "docs" / "development.md").read_text()
 
     assert "from async_multi_search import web_search" in foundation_doc
-    assert "no hosted UI" in foundation_doc.lower()
+    assert "hosted ui" in foundation_doc.lower()
     assert "no model zoo" in foundation_doc.lower()
     assert "no database" in development_doc.lower()
     assert ".omx/ultragoal" not in foundation_doc

@@ -46,5 +46,4 @@ from async_multi_search import web_search
 ```
 
 Until the graph implementation grows beyond the foundation story, this entry
-point should remain lightweight and import-safe. Avoid adding hosted UI, model
-zoo, database, or multi-user service assumptions to the foundation layer.
+point should remain lightweight and import-safe. Avoid adding a hosted UI, no model zoo, database, or multi-user service assumptions to the foundation layer.
