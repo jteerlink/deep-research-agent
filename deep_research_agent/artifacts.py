@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import csv
 import json
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 JSONPrimitive = str | int | float | bool | None
 JSONValue = JSONPrimitive | list["JSONValue"] | dict[str, "JSONValue"]
@@ -41,7 +42,9 @@ def _coerce_record(record: ArtifactRecord | object) -> dict[str, Any]:
     elif isinstance(record, Mapping):
         raw_record = dict(record)
     else:
-        raise TypeError(f"artifact records must be mappings or dataclass instances, got {type(record)!r}")
+        raise TypeError(
+            f"artifact records must be mappings or dataclass instances, got {type(record)!r}"
+        )
 
     coerced: dict[str, Any] = {}
     for key, value in raw_record.items():
@@ -160,7 +163,13 @@ def write_markdown_artifact(
     normalized = _normalize_records(records)
     columns = _resolve_fieldnames(normalized, fieldnames)
 
-    lines = [f"# {title}", "", f"Schema version: `{ARTIFACT_SCHEMA_VERSION}`", "", f"Records: {len(normalized)}"]
+    lines = [
+        f"# {title}",
+        "",
+        f"Schema version: `{ARTIFACT_SCHEMA_VERSION}`",
+        "",
+        f"Records: {len(normalized)}",
+    ]
     if columns:
         lines.extend(
             [
@@ -170,7 +179,8 @@ def write_markdown_artifact(
             ]
         )
         for record in normalized:
-            lines.append("| " + " | ".join(_markdown_cell(record.get(column)) for column in columns) + " |")
+            cells = (_markdown_cell(record.get(column)) for column in columns)
+            lines.append("| " + " | ".join(cells) + " |")
     else:
         lines.extend(["", "No records."])
 
