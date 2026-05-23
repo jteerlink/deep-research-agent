@@ -1,234 +1,128 @@
-"""Artifact writers for normalized research evidence records.
-
-The helpers in this module are intentionally schema-light: callers own the
-record validation step, while the writers provide deterministic JSON, CSV, and
-Markdown serialization for already-normalized evidence/prospect records. This
-keeps G001 import compatibility intact and avoids coupling artifact generation
-to a hosted UI, database, or provider runtime.
-"""
+"""JSON, CSV, and Markdown artifact helpers for G002 research outputs."""
 
 from __future__ import annotations
 
 import csv
 import json
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, is_dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-JSONPrimitive = str | int | float | bool | None
-JSONValue = JSONPrimitive | list["JSONValue"] | dict[str, "JSONValue"]
-ArtifactRecord = Mapping[str, Any]
+from .evidence import EvidenceRecord, SearchFailure
+from .prospects import Prospect, validate_prospects_citations
 
-ARTIFACT_SCHEMA_VERSION = "search_evidence_artifact.v1"
-DEFAULT_BASENAME = "search_evidence"
-DEFAULT_MARKDOWN_TITLE = "Search Evidence Artifact"
+ARTIFACT_SCHEMA_VERSION = "g002.search_evidence.v1"
 
 
-@dataclass(frozen=True)
-class ArtifactWriteResult:
-    """Paths and counts produced by a multi-format artifact write."""
+def build_artifact_payload(
+    *,
+    prospects: Sequence[Prospect],
+    evidence_records: Sequence[EvidenceRecord],
+    failures: Sequence[SearchFailure] = (),
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a deterministic, JSON-serializable research artifact payload."""
 
-    json_path: Path
-    csv_path: Path
-    markdown_path: Path
-    record_count: int
-    fieldnames: tuple[str, ...]
-
-
-def _coerce_record(record: ArtifactRecord | object) -> dict[str, Any]:
-    if is_dataclass(record) and not isinstance(record, type):
-        raw_record = asdict(record)
-    elif isinstance(record, Mapping):
-        raw_record = dict(record)
-    else:
-        raise TypeError(
-            f"artifact records must be mappings or dataclass instances, got {type(record)!r}"
-        )
-
-    coerced: dict[str, Any] = {}
-    for key, value in raw_record.items():
-        if not isinstance(key, str):
-            raise TypeError(f"artifact record keys must be strings, got {key!r}")
-        coerced[key] = value
-    return coerced
-
-
-def _normalize_records(records: Iterable[ArtifactRecord | object]) -> list[dict[str, Any]]:
-    return [_coerce_record(record) for record in records]
-
-
-def _resolve_fieldnames(
-    records: Sequence[Mapping[str, Any]], fieldnames: Sequence[str] | None = None
-) -> tuple[str, ...]:
-    if fieldnames is not None:
-        return tuple(fieldnames)
-
-    ordered: list[str] = []
-    seen: set[str] = set()
-    for record in records:
-        for key in record:
-            if key not in seen:
-                seen.add(key)
-                ordered.append(key)
-    return tuple(ordered)
-
-
-def _jsonable(value: Any) -> JSONValue:
-    if value is None or isinstance(value, str | int | float | bool):
-        return value
-    if is_dataclass(value) and not isinstance(value, type):
-        return _jsonable(asdict(value))
-    if isinstance(value, Mapping):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, tuple | list | set):
-        return [_jsonable(item) for item in value]
-    return str(value)
-
-
-def _csv_cell(value: Any) -> str:
-    jsonable = _jsonable(value)
-    if jsonable is None:
-        return ""
-    if isinstance(jsonable, str):
-        return jsonable
-    if isinstance(jsonable, int | float | bool):
-        return str(jsonable)
-    return json.dumps(jsonable, sort_keys=True)
-
-
-def _markdown_cell(value: Any) -> str:
-    text = _csv_cell(value)
-    return text.replace("|", "\\|").replace("\r\n", "<br>").replace("\n", "<br>")
-
-
-def _ensure_parent(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    validate_prospects_citations(prospects, evidence_records)
+    return {
+        "schema_version": ARTIFACT_SCHEMA_VERSION,
+        "metadata": dict(metadata or {}),
+        "prospects": [prospect.to_dict() for prospect in prospects],
+        "evidence": [record.to_dict() for record in evidence_records],
+        "failures": [asdict(failure) for failure in failures],
+    }
 
 
 def write_json_artifact(
-    records: Iterable[ArtifactRecord | object],
     path: str | Path,
     *,
+    prospects: Sequence[Prospect],
+    evidence_records: Sequence[EvidenceRecord],
+    failures: Sequence[SearchFailure] = (),
     metadata: Mapping[str, Any] | None = None,
 ) -> Path:
-    """Write normalized records as a versioned JSON artifact envelope."""
+    """Write the canonical JSON artifact and return its path."""
 
     output_path = Path(path)
-    normalized = _normalize_records(records)
-    payload: dict[str, JSONValue] = {
-        "schema_version": ARTIFACT_SCHEMA_VERSION,
-        "record_count": len(normalized),
-        "metadata": _jsonable(dict(metadata or {})),
-        "records": _jsonable(normalized),
-    }
-
-    _ensure_parent(output_path)
+    payload = build_artifact_payload(
+        prospects=prospects,
+        evidence_records=evidence_records,
+        failures=failures,
+        metadata=metadata,
+    )
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return output_path
 
 
 def write_csv_artifact(
-    records: Iterable[ArtifactRecord | object],
     path: str | Path,
     *,
-    fieldnames: Sequence[str] | None = None,
+    prospects: Sequence[Prospect],
+    evidence_records: Sequence[EvidenceRecord],
 ) -> Path:
-    """Write normalized records as CSV with deterministic column order."""
+    """Write a prospect-oriented CSV artifact with citation ids."""
 
+    validate_prospects_citations(prospects, evidence_records)
     output_path = Path(path)
-    normalized = _normalize_records(records)
-    columns = _resolve_fieldnames(normalized, fieldnames)
-
-    _ensure_parent(output_path)
-    with output_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
-        if columns:
-            writer.writeheader()
-        for record in normalized:
-            writer.writerow({column: _csv_cell(record.get(column)) for column in columns})
+    with output_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["name", "summary", "citation_ids", "metadata_json"],
+        )
+        writer.writeheader()
+        for prospect in prospects:
+            writer.writerow(
+                {
+                    "name": prospect.name,
+                    "summary": prospect.summary,
+                    "citation_ids": ";".join(
+                        citation.evidence_id for citation in prospect.citations
+                    ),
+                    "metadata_json": json.dumps(dict(prospect.metadata), sort_keys=True),
+                }
+            )
     return output_path
 
 
 def write_markdown_artifact(
-    records: Iterable[ArtifactRecord | object],
     path: str | Path,
     *,
-    title: str = DEFAULT_MARKDOWN_TITLE,
-    fieldnames: Sequence[str] | None = None,
-) -> Path:
-    """Write normalized records as a compact Markdown report table."""
-
-    output_path = Path(path)
-    normalized = _normalize_records(records)
-    columns = _resolve_fieldnames(normalized, fieldnames)
-
-    lines = [
-        f"# {title}",
-        "",
-        f"Schema version: `{ARTIFACT_SCHEMA_VERSION}`",
-        "",
-        f"Records: {len(normalized)}",
-    ]
-    if columns:
-        lines.extend(
-            [
-                "",
-                "| " + " | ".join(columns) + " |",
-                "| " + " | ".join("---" for _ in columns) + " |",
-            ]
-        )
-        for record in normalized:
-            cells = (_markdown_cell(record.get(column)) for column in columns)
-            lines.append("| " + " | ".join(cells) + " |")
-    else:
-        lines.extend(["", "No records."])
-
-    _ensure_parent(output_path)
-    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return output_path
-
-
-def write_research_artifacts(
-    records: Iterable[ArtifactRecord | object],
-    output_dir: str | Path,
-    *,
-    basename: str = DEFAULT_BASENAME,
+    prospects: Sequence[Prospect],
+    evidence_records: Sequence[EvidenceRecord],
+    failures: Sequence[SearchFailure] = (),
     metadata: Mapping[str, Any] | None = None,
-    fieldnames: Sequence[str] | None = None,
-    markdown_title: str = DEFAULT_MARKDOWN_TITLE,
-) -> ArtifactWriteResult:
-    """Write JSON, CSV, and Markdown artifacts for the same normalized records."""
+) -> Path:
+    """Write a readable Markdown artifact with prospects, citations, and evidence."""
 
-    normalized = _normalize_records(records)
-    columns = _resolve_fieldnames(normalized, fieldnames)
-    directory = Path(output_dir)
+    validate_prospects_citations(prospects, evidence_records)
+    output_path = Path(path)
+    lines = ["# Deep Research Artifact", "", f"Schema: `{ARTIFACT_SCHEMA_VERSION}`", ""]
+    if metadata:
+        lines.extend(["## Metadata", ""])
+        for key, value in sorted(metadata.items()):
+            lines.append(f"- **{key}**: {value}")
+        lines.append("")
 
-    json_path = write_json_artifact(normalized, directory / f"{basename}.json", metadata=metadata)
-    csv_path = write_csv_artifact(normalized, directory / f"{basename}.csv", fieldnames=columns)
-    markdown_path = write_markdown_artifact(
-        normalized,
-        directory / f"{basename}.md",
-        title=markdown_title,
-        fieldnames=columns,
-    )
-    return ArtifactWriteResult(
-        json_path=json_path,
-        csv_path=csv_path,
-        markdown_path=markdown_path,
-        record_count=len(normalized),
-        fieldnames=columns,
-    )
+    lines.extend(["## Prospects", ""])
+    for prospect in prospects:
+        lines.extend([f"### {prospect.name}", "", prospect.summary, ""])
+        if prospect.citations:
+            lines.append("Citations:")
+            for citation in prospect.citations:
+                quote = f" — \"{citation.quote}\"" if citation.quote else ""
+                lines.append(f"- `{citation.evidence_id}`: {citation.claim}{quote}")
+            lines.append("")
 
-
-__all__ = [
-    "ARTIFACT_SCHEMA_VERSION",
-    "DEFAULT_BASENAME",
-    "DEFAULT_MARKDOWN_TITLE",
-    "ArtifactRecord",
-    "ArtifactWriteResult",
-    "write_csv_artifact",
-    "write_json_artifact",
-    "write_markdown_artifact",
-    "write_research_artifacts",
-]
+    lines.extend(["## Evidence", ""])
+    for record in evidence_records:
+        lines.append(
+            f"- `{record.id}` ({record.source_type}, {record.provider}, rank {record.rank}): "
+            f"[{record.title}]({record.url})"
+        )
+    if failures:
+        lines.extend(["", "## Search Failures", ""])
+        for failure in failures:
+            lines.append(f"- `{failure.query}`: {failure.error_class}: {failure.error_message}")
+    output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return output_path

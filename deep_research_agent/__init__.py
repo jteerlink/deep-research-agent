@@ -9,17 +9,10 @@ from .config import (
     OpenAIConfig,
     load_config,
 )
-from .search import (
-    Citation,
-    CitationValidationError,
-    EvidenceKind,
-    EvidenceRecord,
-    Prospect,
-    SearchEvidenceArtifact,
-    SearchResult,
-    collect_search_evidence,
-    web_search,
-)
+from .artifacts import ARTIFACT_SCHEMA_VERSION, build_artifact_payload
+from .evidence import EvidenceRecord, SearchEvidenceBatch, SearchFailure, collect_search_evidence
+from .prospects import CitationValidationError, Prospect, ProspectCitation
+from .search import SearchResult, web_search
 
 __all__ = [
     "AppConfig",
@@ -28,13 +21,15 @@ __all__ = [
     "OllamaNativeConfig",
     "OllamaOpenAIConfig",
     "OpenAIConfig",
-    "Citation",
+    "ARTIFACT_SCHEMA_VERSION",
     "CitationValidationError",
-    "EvidenceKind",
     "EvidenceRecord",
     "Prospect",
-    "SearchEvidenceArtifact",
+    "ProspectCitation",
+    "SearchEvidenceBatch",
+    "SearchFailure",
     "SearchResult",
+    "build_artifact_payload",
     "collect_search_evidence",
     "load_config",
     "web_search",
