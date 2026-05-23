@@ -1,540 +1,348 @@
-"""Nested local research workflow with durable thread checkpoints.
+"""Local nested research workflow with durable checkpoint metadata for G003.
 
-G003 keeps execution local-first and import-safe while modeling the approved
-main -> supervisor -> researcher topology. LangGraph is optional: when it is not
-installed, the exported ``graph`` object still supports ``invoke``/``ainvoke``
-for mocked smoke tests and CLI execution.
+The implementation is intentionally local-first: it exposes a small graph-like
+``invoke``/``ainvoke`` interface that works without a hosted LangGraph server,
+database, or live model provider. When the optional LangGraph dependency is not
+installed this object remains import-safe for the package and CLI surfaces.
 """
 
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import os
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from copy import deepcopy
+import re
+from collections.abc import Mapping, MutableMapping, Sequence
+from dataclasses import asdict, dataclass, field, is_dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 from uuid import uuid4
 
-from async_multi_search import SearchResult
+from .config import ModelProvider, load_config
 
-from .config import AppConfig
-from .evidence import SearchFailure, normalize_search_results
-from .models import FallbackEvent, ModelClient, ModelRequest, build_model_client
+WorkflowStatus = Literal["completed", "interrupted"]
+ReviewStatus = Literal["pending", "approved"]
 
-WorkflowStatus = Literal["running", "interrupted", "completed", "failed"]
-RouteName = Literal["researcher", "review", "finish"]
-SearchCallable = Callable[[str, int], Sequence[SearchResult] | Awaitable[Sequence[SearchResult]]]
-
-DEFAULT_MAX_ITERATIONS = 3
-DEFAULT_MIN_EVIDENCE_RECORDS = 1
+DEFAULT_MAX_RESEARCH_ITERATIONS = 3
 CHECKPOINT_SCHEMA_VERSION = "g003.local_checkpoint.v1"
 GRAPH_TOPOLOGY = {
-    "main": ("supervisor",),
-    "supervisor": ("researcher", "review", "finish"),
+    "main": ("supervisor", "review"),
+    "supervisor": ("researcher", "synthesize"),
     "researcher": ("supervisor",),
-    "review": ("finish",),
-    "finish": (),
 }
 
 
 class ResearchState(TypedDict, total=False):
-    """State carried through the nested main/supervisor/researcher workflow."""
+    """State shared by the main, supervisor, and researcher workflow layers."""
 
     query: str
     thread_id: str
-    status: WorkflowStatus
-    next: RouteName
-    iteration: int
-    max_iterations: int
-    min_evidence_records: int
-    evidence: list[dict[str, Any]]
-    failures: list[dict[str, Any]]
     answer: str
+    status: WorkflowStatus
+    review_status: ReviewStatus
+    interrupt_reason: str
+    interrupted: bool
+    needs_review: bool
     sufficient: bool
+    max_research_iterations: int
+    research_iterations: int
+    findings: list[dict[str, Any]]
+    events: list[dict[str, Any]]
     fallback_events: list[dict[str, Any]]
-    model_metadata: dict[str, Any]
-    review_required: bool
-    review_interrupt: dict[str, Any]
-    review_approved: bool
-    messages: list[dict[str, Any]]
+    next_node: str
 
 
-class ReviewInterrupt(RuntimeError):
-    """Raised by callers that request exception-style review interruption."""
+@dataclass(frozen=True)
+class GraphRunResult:
+    """Result returned by CLI helpers after a workflow invocation."""
 
-    def __init__(self, state: ResearchState):
-        self.state = state
-        super().__init__(f"review required for thread {state.get('thread_id', '')}")
+    thread_id: str
+    state: ResearchState
+    checkpoint_path: Path
+
+
+@dataclass(frozen=True)
+class ModelFallbackEvent:
+    """Serializable fallback metadata emitted by graph nodes."""
+
+    provider: str
+    model: str
+    trigger: str
+    node: str
+    retry_count: int
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    error_class: str = ""
+    error_message: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 class LocalCheckpointStore:
-    """Durable JSON checkpoint store keyed by thread id."""
+    """Durable JSON checkpoint store keyed by LangGraph-style thread id."""
 
-    def __init__(self, root: str | Path | None = None):
-        default_root = os.environ.get(
-            "DEEP_RESEARCH_CHECKPOINT_DIR", ".deep_research_agent/checkpoints"
-        )
-        self.root = Path(default_root if root is None else root)
+    def __init__(self, root: str | Path | None = None) -> None:
+        configured = root or os.environ.get("DEEP_RESEARCH_CHECKPOINT_DIR")
+        self.root = Path(configured or ".deep_research_agent/checkpoints")
 
     def path_for(self, thread_id: str) -> Path:
-        """Return the checkpoint path for ``thread_id``."""
-
-        safe_thread_id = thread_id.replace("/", "_")
+        safe_thread_id = re.sub(r"[^A-Za-z0-9_.-]", "_", thread_id)
         return self.root / f"{safe_thread_id}.json"
 
-    def save(self, state: Mapping[str, Any]) -> Path:
-        """Persist a checkpoint and return its path."""
-
-        thread_id = str(state.get("thread_id") or "")
-        if not thread_id:
-            raise ValueError("checkpoint state requires thread_id")
+    def save(self, thread_id: str, state: Mapping[str, Any]) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.path_for(thread_id)
         payload = {
             "schema_version": CHECKPOINT_SCHEMA_VERSION,
             "thread_id": thread_id,
-            "state": _jsonable_state(state),
+            "saved_at": datetime.now(UTC).isoformat(),
+            "state": _jsonable(dict(state)),
         }
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return path
 
     def load(self, thread_id: str) -> ResearchState:
-        """Load checkpoint state for ``thread_id``."""
-
         path = self.path_for(thread_id)
-        if not path.exists():
-            raise FileNotFoundError(f"checkpoint not found for thread_id={thread_id!r}")
         payload = json.loads(path.read_text(encoding="utf-8"))
         if payload.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
-            raise ValueError(f"unsupported checkpoint schema: {payload.get('schema_version')!r}")
+            raise ValueError(f"unsupported checkpoint schema for thread {thread_id!r}")
         return dict(payload["state"])
 
-    def inspect(self, thread_id: str | None = None) -> dict[str, Any]:
-        """Return checkpoint metadata for one thread or all local threads."""
-
-        if thread_id:
-            path = self.path_for(thread_id)
-            state = self.load(thread_id)
-            return {
-                "schema_version": CHECKPOINT_SCHEMA_VERSION,
-                "thread_id": thread_id,
-                "path": str(path),
-                "exists": True,
-                "status": state.get("status"),
-                "iteration": state.get("iteration", 0),
-                "next": state.get("next"),
-            }
-        checkpoints = []
-        if self.root.exists():
-            for path in sorted(self.root.glob("*.json")):
-                try:
-                    payload = json.loads(path.read_text(encoding="utf-8"))
-                    state = payload.get("state", {})
-                except (OSError, json.JSONDecodeError):
-                    continue
-                checkpoints.append(
-                    {
-                        "thread_id": (
-                            payload.get("thread_id") or state.get("thread_id") or path.stem
-                        ),
-                        "path": str(path),
-                        "status": state.get("status"),
-                        "iteration": state.get("iteration", 0),
-                        "next": state.get("next"),
-                    }
-                )
-        return {"schema_version": CHECKPOINT_SCHEMA_VERSION, "checkpoints": checkpoints}
+    def inspect(self, thread_id: str) -> dict[str, Any]:
+        path = self.path_for(thread_id)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["checkpoint_path"] = str(path)
+        return payload
 
 
-def _jsonable_state(state: Mapping[str, Any]) -> dict[str, Any]:
-    def convert(value: Any) -> Any:
-        if isinstance(value, FallbackEvent):
-            return value.to_dict()
-        if hasattr(value, "to_dict") and callable(value.to_dict):
-            return value.to_dict()
-        if isinstance(value, Mapping):
-            return {str(key): convert(item) for key, item in value.items()}
-        if isinstance(value, tuple | list):
-            return [convert(item) for item in value]
-        if isinstance(value, str | int | float | bool) or value is None:
-            return value
-        return str(value)
+class LocalResearchGraph:
+    """Import-safe nested workflow runner with LangGraph-compatible methods."""
 
-    return {str(key): convert(value) for key, value in state.items() if not callable(value)}
-
-
-def _ensure_state(
-    state: Mapping[str, Any] | None = None, *, query: str | None = None
-) -> ResearchState:
-    current: ResearchState = dict(state or {})
-    if query is not None:
-        current["query"] = query
-    current.setdefault("thread_id", str(uuid4()))
-    current.setdefault("status", "running")
-    current.setdefault("iteration", 0)
-    current.setdefault("max_iterations", DEFAULT_MAX_ITERATIONS)
-    current.setdefault("min_evidence_records", DEFAULT_MIN_EVIDENCE_RECORDS)
-    current.setdefault("evidence", [])
-    current.setdefault("failures", [])
-    current.setdefault("fallback_events", [])
-    current.setdefault("messages", [])
-    current.setdefault("review_required", False)
-    current.setdefault("review_approved", False)
-    return current
-
-
-def main_node(state: ResearchState) -> ResearchState:
-    """Initialize state for the top-level main graph."""
-
-    current = _ensure_state(state)
-    current["status"] = "running"
-    current["messages"].append({"node": "main", "event": "started"})
-    return current
-
-
-def _finish_or_review(state: ResearchState) -> RouteName:
-    return (
-        "review"
-        if state.get("review_required") and not state.get("review_approved")
-        else "finish"
-    )
-
-
-def route_after_supervisor(state: ResearchState) -> RouteName:
-    """Route to researcher until evidence is sufficient or max iterations hit."""
-
-    evidence_count = len(state.get("evidence", []))
-    min_evidence = int(state.get("min_evidence_records", DEFAULT_MIN_EVIDENCE_RECORDS))
-    iteration = int(state.get("iteration", 0))
-    max_iterations = int(state.get("max_iterations", DEFAULT_MAX_ITERATIONS))
-    if evidence_count >= min_evidence:
-        return _finish_or_review(state)
-    if iteration >= max_iterations:
-        return _finish_or_review(state)
-    return "researcher"
-
-
-def supervisor_node(state: ResearchState) -> ResearchState:
-    """Decide whether to delegate research, interrupt for review, or finish."""
-
-    current: ResearchState = dict(state)
-    route = route_after_supervisor(current)
-    current["next"] = route
-    current["sufficient"] = route != "researcher"
-    current.setdefault("messages", []).append(
-        {
-            "node": "supervisor",
-            "event": "route",
-            "next": route,
-            "iteration": current.get("iteration", 0),
-            "evidence_count": len(current.get("evidence", [])),
-        }
-    )
-    return current
-
-
-async def _maybe_await(value: Any) -> Any:
-    if inspect.isawaitable(value):
-        return await value
-    return value
-
-
-async def researcher_node(
-    state: ResearchState,
-    *,
-    search: SearchCallable | None = None,
-    model_client: ModelClient | None = None,
-    config: AppConfig | None = None,
-) -> ResearchState:
-    """Run one researcher iteration and append evidence/fallback metadata."""
-
-    current: ResearchState = dict(state)
-    current.setdefault("evidence", [])
-    current.setdefault("failures", [])
-    current.setdefault("fallback_events", [])
-    current.setdefault("messages", [])
-    iteration = int(current.get("iteration", 0)) + 1
-    current["iteration"] = iteration
-    query = str(current.get("query", ""))
-    max_results = int(current.get("max_results", 5))
-
-    if search is None:
-        current["failures"].append(
-            SearchFailure(
-                query=query,
-                error_class="SearchNotConfigured",
-                error_message="No search callable was provided for the local workflow.",
-            ).to_dict()
-        )
-    else:
-        try:
-            results = await _maybe_await(search(query, max_results))
-            current["evidence"].extend(
-                record.to_dict() for record in normalize_search_results(query, results)
-            )
-        except Exception as exc:  # pragma: no cover - defensive local workflow boundary
-            current["failures"].append(
-                SearchFailure(
-                    query=query,
-                    error_class=type(exc).__name__,
-                    error_message=str(exc),
-                ).to_dict()
-            )
-
-    client = build_model_client(config) if model_client is None else model_client
-    response = await client.invoke(
-        ModelRequest(
-            node="researcher",
-            prompt=query,
-            metadata={
-                "thread_id": current.get("thread_id", ""),
-                "iteration": iteration,
-                "evidence_count": len(current.get("evidence", [])),
-            },
-        )
-    )
-    current["model_metadata"] = response.to_dict()
-    current["fallback_events"].extend(event.to_dict() for event in response.fallback_events)
-    current["messages"].append(
-        {
-            "node": "researcher",
-            "event": "iteration_complete",
-            "iteration": iteration,
-            "evidence_count": len(current.get("evidence", [])),
-            "fallback_event_count": len(response.fallback_events),
-        }
-    )
-    return current
-
-
-def review_node(state: ResearchState) -> ResearchState:
-    """Interrupt before finalization unless review was explicitly approved."""
-
-    current: ResearchState = dict(state)
-    if current.get("review_required") and not current.get("review_approved"):
-        current["status"] = "interrupted"
-        current["review_interrupt"] = {
-            "reason": "review_required",
-            "thread_id": current.get("thread_id", ""),
-            "iteration": current.get("iteration", 0),
-            "evidence_count": len(current.get("evidence", [])),
-        }
-        current.setdefault("messages", []).append({"node": "review", "event": "interrupted"})
-        return current
-    return finish_node(current)
-
-
-def finish_node(state: ResearchState) -> ResearchState:
-    """Finalize a workflow state."""
-
-    current: ResearchState = dict(state)
-    current["status"] = "completed"
-    if current.get("evidence"):
-        current["answer"] = f"Collected {len(current['evidence'])} evidence record(s)."
-    elif current.get("failures"):
-        current["answer"] = "No evidence collected; see failures for local execution details."
-    else:
-        current["answer"] = "Research workflow completed without evidence."
-    current.setdefault("messages", []).append({"node": "finish", "event": "completed"})
-    return current
-
-
-class LocalResearchWorkflow:
-    """Executable local workflow with durable checkpoint save/load semantics."""
-
-    def __init__(
-        self,
-        *,
-        checkpoint_store: LocalCheckpointStore | None = None,
-        model_client: ModelClient | None = None,
-        config: AppConfig | None = None,
-    ):
+    def __init__(self, checkpoint_store: LocalCheckpointStore | None = None) -> None:
         self.checkpoint_store = checkpoint_store or LocalCheckpointStore()
-        self.model_client = model_client
-        self.config = config
-
-    async def arun(
-        self,
-        state: Mapping[str, Any] | None = None,
-        *,
-        query: str | None = None,
-        thread_id: str | None = None,
-        search: SearchCallable | None = None,
-        require_review: bool | None = None,
-        approve_review: bool = False,
-        max_iterations: int | None = None,
-        min_evidence_records: int | None = None,
-        raise_on_interrupt: bool = False,
-    ) -> ResearchState:
-        current = _ensure_state(state, query=query)
-        if thread_id is not None:
-            current["thread_id"] = thread_id
-        if require_review is not None:
-            current["review_required"] = require_review
-        if approve_review:
-            current["review_approved"] = True
-            current.pop("review_interrupt", None)
-        if max_iterations is not None:
-            current["max_iterations"] = max_iterations
-        if min_evidence_records is not None:
-            current["min_evidence_records"] = min_evidence_records
-
-        current = main_node(current)
-        while True:
-            current = supervisor_node(current)
-            self.checkpoint_store.save(current)
-            route = current.get("next")
-            if route == "researcher":
-                current = await researcher_node(
-                    current,
-                    search=search,
-                    model_client=self.model_client,
-                    config=self.config,
-                )
-                self.checkpoint_store.save(current)
-                continue
-            if route == "review":
-                current = review_node(current)
-                self.checkpoint_store.save(current)
-                if current.get("status") == "interrupted" and raise_on_interrupt:
-                    raise ReviewInterrupt(current)
-                return current
-            current = finish_node(current)
-            self.checkpoint_store.save(current)
-            return current
-
-    async def aresume(
-        self,
-        thread_id: str,
-        *,
-        approve_review: bool = False,
-        search: SearchCallable | None = None,
-        raise_on_interrupt: bool = False,
-    ) -> ResearchState:
-        """Resume a durable thread checkpoint."""
-
-        state = self.checkpoint_store.load(thread_id)
-        if state.get("status") == "interrupted" and not approve_review:
-            if raise_on_interrupt:
-                raise ReviewInterrupt(state)
-            return state
-        return await self.arun(
-            state,
-            thread_id=thread_id,
-            search=search,
-            approve_review=approve_review,
-            raise_on_interrupt=raise_on_interrupt,
-        )
-
-    def run(self, *args: Any, **kwargs: Any) -> ResearchState:
-        """Synchronous wrapper for local scripts/tests."""
-
-        return asyncio.run(self.arun(*args, **kwargs))
-
-    def resume(self, *args: Any, **kwargs: Any) -> ResearchState:
-        """Synchronous resume wrapper for local scripts/tests."""
-
-        return asyncio.run(self.aresume(*args, **kwargs))
-
-
-class LocalCompiledGraph:
-    """Small ``invoke``/``ainvoke`` facade used when LangGraph is unavailable."""
-
-    def __init__(self, workflow: LocalResearchWorkflow | None = None):
-        self.workflow = workflow or LocalResearchWorkflow()
-        self.topology = deepcopy(GRAPH_TOPOLOGY)
-
-    async def ainvoke(
-        self, state: Mapping[str, Any], config: Mapping[str, Any] | None = None
-    ) -> ResearchState:
-        configurable = dict((config or {}).get("configurable", {})) if config else {}
-        thread_id = configurable.get("thread_id") or state.get("thread_id")
-        return await self.workflow.arun(state, thread_id=thread_id)
+        self.topology = GRAPH_TOPOLOGY
 
     def invoke(
         self, state: Mapping[str, Any], config: Mapping[str, Any] | None = None
     ) -> ResearchState:
-        return asyncio.run(self.ainvoke(state, config=config))
+        return _run_research_workflow(
+            state,
+            checkpoint_store=self.checkpoint_store,
+            config=config,
+        )
 
-    def get_graph(self) -> dict[str, tuple[str, ...]]:
-        return deepcopy(self.topology)
+    async def ainvoke(
+        self, state: Mapping[str, Any], config: Mapping[str, Any] | None = None
+    ) -> ResearchState:
+        return self.invoke(state, config=config)
 
 
-def _build_graph() -> Any:
-    """Build a LangGraph graph when available, otherwise a local facade."""
+def _jsonable(value: Any) -> Any:
+    if is_dataclass(value) and not isinstance(value, type):
+        return _jsonable(asdict(value))
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, tuple):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, ModelProvider):
+        return value.value
+    return value
 
-    try:
-        from langgraph.graph import END, StateGraph  # type: ignore[import-not-found]
-    except ImportError:
-        return LocalCompiledGraph()
 
-    async def run_researcher(state: ResearchState) -> ResearchState:
-        return await researcher_node(state)
-
-    builder = StateGraph(ResearchState)
-    builder.add_node("main", main_node)
-    builder.add_node("supervisor", supervisor_node)
-    builder.add_node("researcher", run_researcher)
-    builder.add_node("review", review_node)
-    builder.add_node("finish", finish_node)
-    builder.set_entry_point("main")
-    builder.add_edge("main", "supervisor")
-    builder.add_conditional_edges(
-        "supervisor",
-        lambda state: state.get("next", "finish"),
-        {"researcher": "researcher", "review": "review", "finish": "finish"},
+def _append_event(state: MutableMapping[str, Any], node: str, event: str, **metadata: Any) -> None:
+    state.setdefault("events", []).append(
+        {
+            "node": node,
+            "event": event,
+            "timestamp": datetime.now(UTC).isoformat(),
+            **_jsonable(metadata),
+        }
     )
-    builder.add_edge("researcher", "supervisor")
-    builder.add_edge("review", END)
-    builder.add_edge("finish", END)
-    return builder.compile()
 
 
-async def run_research(
+def _append_fallback_event(
+    state: MutableMapping[str, Any], *, node: str, trigger: str, retry_count: int = 0
+) -> None:
+    config = load_config()
+    provider = config.primary_provider
+    model = config.primary_model
+    event = ModelFallbackEvent(
+        provider=provider.value,
+        model=model,
+        trigger=trigger,
+        node=node,
+        retry_count=retry_count,
+    )
+    state.setdefault("fallback_events", []).append(event.to_dict())
+
+
+def _thread_id_from_config(config: Mapping[str, Any] | None) -> str | None:
+    if not config:
+        return None
+    configurable = config.get("configurable")
+    if isinstance(configurable, Mapping):
+        thread_id = configurable.get("thread_id")
+        if thread_id:
+            return str(thread_id)
+    thread_id = config.get("thread_id")
+    return str(thread_id) if thread_id else None
+
+
+def _initial_state(
+    state: Mapping[str, Any], *, config: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    prepared = dict(state)
+    prepared.setdefault("thread_id", _thread_id_from_config(config) or f"thread-{uuid4()}")
+    prepared.setdefault("max_research_iterations", DEFAULT_MAX_RESEARCH_ITERATIONS)
+    prepared.setdefault("research_iterations", 0)
+    prepared.setdefault("findings", [])
+    prepared.setdefault("events", [])
+    prepared.setdefault("fallback_events", [])
+    prepared.setdefault("sufficient", False)
+    prepared.setdefault("needs_review", True)
+    return prepared
+
+
+def _supervisor_node(state: dict[str, Any]) -> str:
+    _append_event(state, "supervisor", "evaluate")
+    if state.get("sufficient"):
+        state["next_node"] = "synthesize"
+        return "synthesize"
+    if int(state.get("research_iterations", 0)) >= int(
+        state.get("max_research_iterations", DEFAULT_MAX_RESEARCH_ITERATIONS)
+    ):
+        state["sufficient"] = True
+        state["next_node"] = "synthesize"
+        _append_event(state, "supervisor", "max_iterations_reached")
+        return "synthesize"
+    state["next_node"] = "researcher"
+    _append_event(state, "supervisor", "delegate", target="researcher")
+    return "researcher"
+
+
+def _researcher_node(state: dict[str, Any]) -> None:
+    iteration = int(state.get("research_iterations", 0)) + 1
+    state["research_iterations"] = iteration
+    query = str(state.get("query", "")).strip()
+    finding = {
+        "iteration": iteration,
+        "summary": f"Research pass {iteration} for: {query or 'unspecified query'}",
+        "source_type": "mocked_local_research",
+    }
+    state.setdefault("findings", []).append(finding)
+    _append_fallback_event(state, node="researcher", trigger="deterministic_local_research")
+    _append_event(state, "researcher", "finding_recorded", iteration=iteration)
+    if iteration >= int(state.get("max_research_iterations", DEFAULT_MAX_RESEARCH_ITERATIONS)):
+        state["sufficient"] = True
+        _append_event(state, "researcher", "sufficiency_reached", reason="max_iterations")
+
+
+def _synthesize_node(state: dict[str, Any]) -> None:
+    query = str(state.get("query", "")).strip()
+    count = len(state.get("findings", []))
+    state["answer"] = f"Draft answer for {query or 'the research query'} using {count} finding(s)."
+    state["next_node"] = "review"
+    _append_event(state, "synthesize", "draft_created", finding_count=count)
+
+
+def _review_node(state: dict[str, Any]) -> None:
+    if state.get("review_status") != "approved" and state.get("needs_review", True):
+        state["status"] = "interrupted"
+        state["interrupted"] = True
+        state["interrupt_reason"] = "review_required"
+        state["next_node"] = "review"
+        _append_event(state, "review", "interrupt", reason="review_required")
+        return
+    state["status"] = "completed"
+    state["interrupted"] = False
+    state["review_status"] = "approved"
+    state["next_node"] = "end"
+    _append_event(state, "review", "approved")
+
+
+def _run_research_workflow(
+    state: Mapping[str, Any], *, checkpoint_store: LocalCheckpointStore, config: Mapping[str, Any] | None = None
+) -> ResearchState:
+    current = _initial_state(state, config=config)
+    if current.get("review_status") == "approved":
+        current["needs_review"] = False
+    _append_event(current, "main", "start", topology=GRAPH_TOPOLOGY)
+    while True:
+        next_node = _supervisor_node(current)
+        if next_node == "synthesize":
+            break
+        _researcher_node(current)
+    _synthesize_node(current)
+    _review_node(current)
+    checkpoint_store.save(str(current["thread_id"]), current)
+    return current
+
+
+def build_graph(checkpoint_store: LocalCheckpointStore | None = None) -> LocalResearchGraph:
+    """Build the import-safe local graph runner used by package and CLI entrypoints."""
+
+    return LocalResearchGraph(checkpoint_store=checkpoint_store)
+
+
+def run_query(
     query: str,
     *,
     thread_id: str | None = None,
     checkpoint_dir: str | Path | None = None,
-    require_review: bool = False,
-    max_iterations: int = DEFAULT_MAX_ITERATIONS,
-    min_evidence_records: int = DEFAULT_MIN_EVIDENCE_RECORDS,
-    search: SearchCallable | None = None,
-) -> ResearchState:
-    """Run a local research thread and persist checkpoints."""
-
-    workflow = LocalResearchWorkflow(checkpoint_store=LocalCheckpointStore(checkpoint_dir))
-    return await workflow.arun(
-        query=query,
-        thread_id=thread_id,
-        require_review=require_review,
-        max_iterations=max_iterations,
-        min_evidence_records=min_evidence_records,
-        search=search,
+    max_iterations: int = DEFAULT_MAX_RESEARCH_ITERATIONS,
+    approve: bool = False,
+) -> GraphRunResult:
+    store = LocalCheckpointStore(checkpoint_dir)
+    state: ResearchState = {
+        "query": query,
+        "max_research_iterations": max_iterations,
+    }
+    if thread_id:
+        state["thread_id"] = thread_id
+    if approve:
+        state["review_status"] = "approved"
+    result = build_graph(store).invoke(state, config={"configurable": {"thread_id": thread_id}} if thread_id else None)
+    return GraphRunResult(
+        thread_id=str(result["thread_id"]),
+        state=result,
+        checkpoint_path=store.path_for(str(result["thread_id"])),
     )
 
 
-async def resume_research(
+def resume_thread(
     thread_id: str,
     *,
     checkpoint_dir: str | Path | None = None,
-    approve_review: bool = False,
-    search: SearchCallable | None = None,
-) -> ResearchState:
-    """Resume a local research thread by id."""
+    approve: bool = False,
+) -> GraphRunResult:
+    store = LocalCheckpointStore(checkpoint_dir)
+    state = store.load(thread_id)
+    if approve:
+        state["review_status"] = "approved"
+        state["needs_review"] = False
+    result = build_graph(store).invoke(state, config={"configurable": {"thread_id": thread_id}})
+    return GraphRunResult(thread_id=thread_id, state=result, checkpoint_path=store.path_for(thread_id))
 
-    workflow = LocalResearchWorkflow(checkpoint_store=LocalCheckpointStore(checkpoint_dir))
-    return await workflow.aresume(thread_id, approve_review=approve_review, search=search)
 
-
-def inspect_checkpoints(
-    thread_id: str | None = None, *, checkpoint_dir: str | Path | None = None
-) -> dict[str, Any]:
-    """Inspect local durable checkpoint metadata."""
-
+def inspect_thread(
+    thread_id: str, *, checkpoint_dir: str | Path | None = None) -> dict[str, Any]:
     return LocalCheckpointStore(checkpoint_dir).inspect(thread_id)
 
 
-graph = _build_graph()
+def invoke_maybe_async(runnable: Any, state: Mapping[str, Any]) -> Any:
+    """Invoke a graph-like object from sync tests without leaking event loops."""
+
+    if hasattr(runnable, "invoke"):
+        return runnable.invoke(state)
+    result = runnable(state)
+    if asyncio.iscoroutine(result):
+        return asyncio.run(result)
+    return result
+
+
+graph = build_graph()

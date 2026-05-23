@@ -11,7 +11,19 @@ from .config import (
     load_config,
 )
 from .evidence import EvidenceRecord, SearchEvidenceBatch, SearchFailure, collect_search_evidence
-from .models import FallbackEvent, ModelRequest, ModelResponse, build_model_client
+
+from .graph import (
+    CHECKPOINT_SCHEMA_VERSION,
+    GRAPH_TOPOLOGY,
+    GraphRunResult,
+    LocalCheckpointStore,
+    LocalResearchGraph,
+    build_graph,
+    graph,
+    inspect_thread,
+    resume_thread,
+    run_query,
+)
 from .prospects import CitationValidationError, Prospect, ProspectCitation
 from .search import SearchResult, web_search
 
@@ -36,6 +48,16 @@ __all__ = [
     "build_artifact_payload",
     "build_model_client",
     "collect_search_evidence",
+    "CHECKPOINT_SCHEMA_VERSION",
+    "GRAPH_TOPOLOGY",
+    "GraphRunResult",
+    "LocalCheckpointStore",
+    "LocalResearchGraph",
+    "build_graph",
+    "graph",
+    "inspect_thread",
+    "resume_thread",
+    "run_query",
     "load_config",
     "web_search",
 ]
