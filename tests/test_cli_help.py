@@ -1,0 +1,35 @@
+import os
+import subprocess
+import sys
+from importlib.util import find_spec
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_package_cli_help_exits_successfully_without_provider_credentials():
+    if find_spec("deep_research_agent") is None and not (ROOT / "src" / "deep_research_agent").exists():
+        pytest.skip("deep_research_agent package CLI is created by the package/CLI lanes")
+
+    env = os.environ.copy()
+    pythonpath_entries = [str(ROOT), str(ROOT / "src")]
+    if env.get("PYTHONPATH"):
+        pythonpath_entries.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "deep_research_agent", "--help"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    output = f"{result.stdout}\n{result.stderr}".lower()
+    assert result.returncode == 0, output
+    assert "usage" in output or "help" in output
+    assert "api_key" not in output
