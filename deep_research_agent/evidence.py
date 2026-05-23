@@ -94,7 +94,7 @@ def evidence_id_for(query: str, result: SearchResult, rank: int) -> str:
 
     provider = result.provider or "search"
     digest = hashlib.sha1(  # noqa: S324 - deterministic identifier, not security-sensitive
-        f"{query}\0{provider}\0{result.url}\0{rank}".encode("utf-8")
+        f"{query}\0{provider}\0{result.url}\0{rank}".encode()
     ).hexdigest()[:12]
     return f"ev_{digest}"
 

@@ -1,5 +1,6 @@
 """Deep Research Agent package foundation."""
 
+from .artifacts import ARTIFACT_SCHEMA_VERSION, build_artifact_payload
 from .config import (
     AppConfig,
     CodexConfig,
@@ -9,7 +10,6 @@ from .config import (
     OpenAIConfig,
     load_config,
 )
-from .artifacts import ARTIFACT_SCHEMA_VERSION, build_artifact_payload
 from .evidence import EvidenceRecord, SearchEvidenceBatch, SearchFailure, collect_search_evidence
 from .prospects import CitationValidationError, Prospect, ProspectCitation
 from .search import SearchResult, web_search
