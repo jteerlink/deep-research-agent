@@ -99,7 +99,9 @@ def evidence_id_for(query: str, result: SearchResult, rank: int) -> str:
     return f"ev_{digest}"
 
 
-def normalize_search_results(query: str, results: Sequence[SearchResult]) -> tuple[EvidenceRecord, ...]:
+def normalize_search_results(
+    query: str, results: Sequence[SearchResult]
+) -> tuple[EvidenceRecord, ...]:
     """Convert legacy ``SearchResult`` items into citation-ready evidence records."""
 
     records: list[EvidenceRecord] = []

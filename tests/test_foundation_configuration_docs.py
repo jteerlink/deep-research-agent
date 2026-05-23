@@ -45,9 +45,7 @@ def test_langgraph_config_points_to_package_graph_entrypoint() -> None:
 
     assert config["dependencies"] == ["."]
     assert config["env"] == ".env"
-    assert config["graphs"] == {
-        "deep_research_agent": "./src/deep_research_agent/graph.py:graph"
-    }
+    assert config["graphs"] == {"deep_research_agent": "./src/deep_research_agent/graph.py:graph"}
 
 
 def test_foundation_docs_preserve_scope_and_import_compatibility() -> None:

@@ -143,7 +143,9 @@ def test_artifact_payload_and_writers_preserve_schema_and_citations(tmp_path) ->
     )
     assert json.loads(json_path.read_text())["schema_version"] == ARTIFACT_SCHEMA_VERSION
 
-    csv_path = write_csv_artifact(tmp_path / "artifact.csv", prospects=[prospect], evidence_records=[evidence])
+    csv_path = write_csv_artifact(
+        tmp_path / "artifact.csv", prospects=[prospect], evidence_records=[evidence]
+    )
     with csv_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert rows == [
