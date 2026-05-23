@@ -9,6 +9,7 @@ from .config import (
     OpenAIConfig,
     load_config,
 )
+from .search import SearchResult, web_search
 
 __all__ = [
     "AppConfig",
@@ -17,5 +18,7 @@ __all__ = [
     "OllamaNativeConfig",
     "OllamaOpenAIConfig",
     "OpenAIConfig",
+    "SearchResult",
     "load_config",
+    "web_search",
 ]

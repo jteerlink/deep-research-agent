@@ -9,7 +9,7 @@ interface.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from .configuration import AgentConfig, ModelProvider, load_config
@@ -48,14 +48,14 @@ class FallbackEvent:
         node: str,
         retry_count: int,
         error: Exception | None = None,
-    ) -> "FallbackEvent":
+    ) -> FallbackEvent:
         return cls(
             provider=provider,
             model=model,
             trigger=trigger,
             node=node,
             retry_count=retry_count,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             error_class=type(error).__name__ if error else "",
             error_message=str(error) if error else "",
         )

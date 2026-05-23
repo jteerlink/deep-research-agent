@@ -9,9 +9,9 @@ settings are split at the type level and in environment variable names.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Mapping
 
 
 class ModelProvider(StrEnum):

@@ -10,7 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_package_cli_help_exits_successfully_without_provider_credentials():
-    if find_spec("deep_research_agent") is None and not (ROOT / "src" / "deep_research_agent").exists():
+    package_missing = find_spec("deep_research_agent") is None
+    src_package_missing = not (ROOT / "src" / "deep_research_agent").exists()
+    if package_missing and src_package_missing:
         pytest.skip("deep_research_agent package CLI is created by the package/CLI lanes")
 
     env = os.environ.copy()
