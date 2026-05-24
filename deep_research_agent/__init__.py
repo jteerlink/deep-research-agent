@@ -25,7 +25,7 @@ from .graph import (
 )
 from .models import FallbackEvent, ModelRequest, ModelResponse, build_model_client
 from .prospects import CitationValidationError, Prospect, ProspectCitation
-from .search import SearchResult, web_search
+from .search import FirecrawlProvider, SearchResult, YdcProvider, web_search
 
 __all__ = [
     "AppConfig",
@@ -45,6 +45,8 @@ __all__ = [
     "SearchEvidenceBatch",
     "SearchFailure",
     "SearchResult",
+    "FirecrawlProvider",
+    "YdcProvider",
     "build_artifact_payload",
     "build_model_client",
     "collect_search_evidence",

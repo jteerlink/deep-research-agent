@@ -29,6 +29,7 @@ from .prospects import ProspectCitation, ProspectRecord
 WorkflowStatus = Literal["completed", "interrupted"]
 ReviewStatus = Literal["pending", "approved"]
 SearchFn = Callable[[str, int], Awaitable[Sequence[SearchResult]] | Sequence[SearchResult]]
+ProgressCallback = Callable[[dict[str, Any]], object]
 
 DEFAULT_MAX_RESEARCH_ITERATIONS = 3
 CHECKPOINT_SCHEMA_VERSION = "g003.local_checkpoint.v1"
@@ -201,6 +202,8 @@ class LocalResearchWorkflow:
         search: SearchFn | None = None,
         require_review: bool = False,
         max_iterations: int = DEFAULT_MAX_RESEARCH_ITERATIONS,
+        max_results: int = 5,
+        progress_callback: ProgressCallback | None = None,
     ) -> ResearchState:
         return await run_research(
             query,
@@ -209,6 +212,8 @@ class LocalResearchWorkflow:
             search=search,
             require_review=require_review,
             max_iterations=max_iterations,
+            max_results=max_results,
+            progress_callback=progress_callback,
         )
 
     async def aresume(
@@ -217,6 +222,8 @@ class LocalResearchWorkflow:
         *,
         approve_review: bool = False,
         search: SearchFn | None = None,
+        max_results: int | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> ResearchState:
         state = self.checkpoint_store.load(thread_id)
         if not approve_review and state.get("status") == "interrupted":
@@ -229,6 +236,10 @@ class LocalResearchWorkflow:
             search=search,
             require_review=False,
             max_iterations=int(state.get("max_iterations", state.get("iteration", 1)) or 1),
+            max_results=_coerce_int(
+                max_results if max_results is not None else state.get("max_results"), 5
+            ),
+            progress_callback=progress_callback,
             review_approved=True,
             existing_state=state,
         )
@@ -250,16 +261,33 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-def _append_event(state: MutableMapping[str, Any], node: str, event: str, **metadata: Any) -> None:
-    state.setdefault("events", []).append(
-        {
-            "node": node,
-            "event": event,
-            "type": event,
-            "timestamp": datetime.now(UTC).isoformat(),
-            **_jsonable(metadata),
-        }
-    )
+def _coerce_int(value: Any, default: int) -> int:
+    return int(value if value is not None and value != "" else default)
+
+
+def _append_event(
+    state: MutableMapping[str, Any], node: str, event: str, **metadata: Any
+) -> dict[str, Any]:
+    entry = {
+        "node": node,
+        "event": event,
+        "type": event,
+        "timestamp": datetime.now(UTC).isoformat(),
+        **_jsonable(metadata),
+    }
+    state.setdefault("events", []).append(entry)
+    return entry
+
+
+async def _notify_progress(
+    progress_callback: ProgressCallback | None,
+    event: Mapping[str, Any],
+) -> None:
+    if progress_callback is None:
+        return
+    result = progress_callback(dict(event))
+    if isinstance(result, Awaitable):
+        await result
 
 
 def _append_fallback_event(
@@ -492,6 +520,8 @@ async def run_research(
     search: SearchFn | None = None,
     require_review: bool = False,
     max_iterations: int = DEFAULT_MAX_RESEARCH_ITERATIONS,
+    max_results: int = 5,
+    progress_callback: ProgressCallback | None = None,
     review_approved: bool = False,
     existing_state: Mapping[str, Any] | None = None,
     artifact_dir: str | Path | None = None,
@@ -511,8 +541,12 @@ async def run_research(
         state["thread_id"] = selected_thread_id
         state["status"] = "completed"
         state["sufficient"] = bool(state.get("sufficient", True))
-        _append_event(state, "review", "review_resumed")
-        _append_event(state, "main", "workflow_completed")
+        await _notify_progress(
+            progress_callback, _append_event(state, "review", "review_resumed")
+        )
+        await _notify_progress(
+            progress_callback, _append_event(state, "main", "workflow_completed")
+        )
         _write_artifacts_if_requested(state, artifact_dir)
         store.save(selected_thread_id, state)
         return cast(ResearchState, state)
@@ -524,17 +558,24 @@ async def run_research(
         "events": events,
         "iteration": 0,
         "max_iterations": max_iterations,
+        "max_results": max_results,
         "evidence": [],
         "findings": [],
         "fallback_events": [],
         "prospect_targets": [],
         "warnings": [],
     }
-    _append_event(state, "main", "main_started")
+
+    async def record(node: str, event: str, **metadata: Any) -> None:
+        await _notify_progress(progress_callback, _append_event(state, node, event, **metadata))
+
+    await record("main", "main_started")
 
     while route_after_supervisor(state) == "researcher":
-        _append_event(state, "supervisor", "supervisor_delegated", target="researcher")
-        results = await _call_search(search, query, max_results=5)
+        await record("supervisor", "supervisor_delegated", target="researcher")
+        await record("search", "search_started", max_results=max_results)
+        results = await _call_search(search, query, max_results=max_results)
+        await record("search", "search_completed", result_count=len(results))
         state["evidence"] = _evidence_from_results(results)
         state["findings"] = list(state["evidence"])
         state["prospect_targets"] = _prospects_from_evidence(state["evidence"])
@@ -547,25 +588,26 @@ async def run_research(
             )
         )
         state["model_metadata"] = model_response.to_dict()
-        _append_event(state, "model", "fallback_model_used", provider=model_response.provider.value)
-        _append_event(state, "researcher", "researcher_iteration", iteration=state["iteration"])
+        await record("model", "fallback_model_used", provider=model_response.provider.value)
+        await record("researcher", "researcher_iteration", iteration=state["iteration"])
         if state["evidence"] or int(state["iteration"]) >= max_iterations:
             state["sufficient"] = True
-            _append_event(state, "supervisor", "sufficiency_routed")
+            await record("supervisor", "sufficiency_routed")
             break
 
     if not state["evidence"]:
         state["warnings"].append("No search evidence was captured; prospect exports are empty.")
+        await record("warning", "warning_recorded", message=state["warnings"][-1])
 
     if require_review and not review_approved:
         state["status"] = "interrupted"
         state["review_interrupt"] = {"thread_id": selected_thread_id, "reason": "review_required"}
-        _append_event(state, "review", "review_interrupt", reason="review_required")
+        await record("review", "review_interrupt", reason="review_required")
     else:
         state["status"] = "completed"
         if review_approved or existing_state:
-            _append_event(state, "review", "review_resumed")
-        _append_event(state, "main", "workflow_completed")
+            await record("review", "review_resumed")
+        await record("main", "workflow_completed")
     _write_artifacts_if_requested(state, artifact_dir)
     store.save(selected_thread_id, state)
     return cast(ResearchState, state)
@@ -577,6 +619,8 @@ async def resume_research(
     checkpoint_dir: str | Path | None = None,
     approve_review: bool = True,
     search: SearchFn | None = None,
+    max_results: int | None = None,
+    progress_callback: ProgressCallback | None = None,
     artifact_dir: str | Path | None = None,
 ) -> ResearchState:
     """Resume a compatibility async workflow from a checkpoint."""
@@ -592,6 +636,10 @@ async def resume_research(
         search=search,
         require_review=False,
         max_iterations=int(state.get("max_iterations", state.get("iteration", 1)) or 1),
+        max_results=_coerce_int(
+            max_results if max_results is not None else state.get("max_results"), 5
+        ),
+        progress_callback=progress_callback,
         review_approved=approve_review,
         existing_state=state,
         artifact_dir=artifact_dir,
@@ -688,6 +736,7 @@ def run_research_workflow(
     *,
     thread_id: str | None = None,
     checkpoint_dir: str | Path | None = None,
+    max_results: int = 5,
     artifact_dir: str | Path | None = None,
 ) -> ResearchCheckpoint:
     state = asyncio.run(
@@ -696,6 +745,7 @@ def run_research_workflow(
             thread_id=thread_id,
             checkpoint_dir=checkpoint_dir,
             require_review=True,
+            max_results=max_results,
             artifact_dir=artifact_dir,
         )
     )

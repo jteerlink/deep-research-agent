@@ -26,8 +26,9 @@ def test_env_example_documents_provider_split_and_search_keys() -> None:
         "CODEX_OPENAI_MODEL",
         "TAVILY_API_KEY",
         "EXA_API_KEY",
-        "BRAVE_API_KEY",
         "SERPER_API_KEY",
+        "FIRECRAWL_API_KEY",
+        "YDC_API_KEY",
         "LANGGRAPH_HOST",
         "LANGGRAPH_PORT",
     }

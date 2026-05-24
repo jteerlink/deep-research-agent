@@ -11,10 +11,21 @@ local G003 workflow runner with durable thread checkpoints.
 cp .env.example .env
 python -m deep_research_agent --help
 python -m deep_research_agent config --json
+python -m deep_research_agent search-providers
 ```
 
 See [docs/usage.md](docs/usage.md) for offline smoke, optional live smoke,
 checkpoint/resume, and artifact examples.
+
+Optional local UI:
+
+```bash
+python -m pip install -e '.[ui]'
+deep-research-agent ui
+```
+
+The UI accepts provider keys as password fields for the current run only; it
+does not write secrets to `.env`.
 
 ## Local G003 workflow
 
@@ -69,4 +80,6 @@ OpenAI-compatible API surface:
 - `codex`: uses `CODEX_API_KEY`, `CODEX_MODEL`, and `CODEX_BASE_URL`.
 
 Search provider keys remain compatible with the standalone module:
-`TAVILY_API_KEY`, `EXA_API_KEY`, `BRAVE_API_KEY`, and `SERPER_API_KEY`.
+`TAVILY_API_KEY`, `EXA_API_KEY`, `SERPER_API_KEY`, `FIRECRAWL_API_KEY`, and
+`YDC_API_KEY`. Provider priority is `tavily`, `exa`, `serper`, `firecrawl`,
+`ydc`, then keyless `duckduckgo`.

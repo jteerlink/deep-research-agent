@@ -5,13 +5,14 @@ from __future__ import annotations
 from async_multi_search import (  # noqa: F401
     AllProvidersFailedError,
     AsyncMultiProviderSearch,
-    BraveProvider,
     DuckDuckGoProvider,
     ExaProvider,
+    FirecrawlProvider,
     SearchProvider,
     SearchResult,
     SerperProvider,
     TavilyProvider,
+    YdcProvider,
     web_search,
 )
 
@@ -43,13 +44,14 @@ from .prospects import (  # noqa: F401
 __all__ = [
     "AllProvidersFailedError",
     "AsyncMultiProviderSearch",
-    "BraveProvider",
     "DuckDuckGoProvider",
     "ExaProvider",
+    "FirecrawlProvider",
     "SearchProvider",
     "SearchResult",
     "SerperProvider",
     "TavilyProvider",
+    "YdcProvider",
     "CitationValidationError",
     "EvidenceRecord",
     "EvidenceReference",

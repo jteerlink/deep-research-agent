@@ -23,6 +23,9 @@ search = [
 langgraph = [
   "langgraph>=0.2",
 ]
+ui = [
+  "streamlit>=1.36",
+]
 dev = [
   "pytest>=8",
   "ruff>=0.6",
@@ -53,5 +56,5 @@ python_version = "3.11"
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["async_multi_search"]
+module = ["async_multi_search", "streamlit", "streamlit.*"]
 ignore_missing_imports = true

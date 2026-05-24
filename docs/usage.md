@@ -23,6 +23,33 @@ python -m deep_research_agent search-providers
 are optional for offline tests and live smoke can use whichever provider is
 configured first.
 
+Provider priority is:
+
+```text
+tavily -> exa -> serper -> firecrawl -> ydc -> duckduckgo
+```
+
+Set `FIRECRAWL_API_KEY` to enable Firecrawl v2 `/search`. Set `YDC_API_KEY` to
+enable You.com Developer Cloud Search. These integrations use web search result
+descriptions/snippets only; they do not request scraped markdown or page
+content.
+
+## Optional local UI
+
+Install and launch the Streamlit UI:
+
+```bash
+python -m pip install -e '.[ui]'
+deep-research-agent ui
+```
+
+The UI supports query/thread settings, max iterations, checkpoint/artifact
+directories, review approval, search max results/timeout, provider API key
+password fields, run/resume/inspect buttons, a progress timeline, warnings,
+evidence/prospect previews, artifact paths, markdown preview, and raw JSON.
+Provider keys entered in the UI are applied only to the current process/session
+and are not written to `.env`.
+
 ## Model configuration
 
 There are two compatibility configuration surfaces while the root package and

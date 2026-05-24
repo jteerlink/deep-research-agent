@@ -37,6 +37,25 @@ continue to support:
 from async_multi_search import web_search
 ```
 
+Provider priority is `tavily`, `exa`, `serper`, `firecrawl`, `ydc`, then
+keyless `duckduckgo`. Firecrawl is enabled with `FIRECRAWL_API_KEY`; You.com
+Developer Cloud search is enabled with `YDC_API_KEY`. Both are normalized as
+snippet evidence unless a later browser/page-read step captures page content.
+
+## Local Streamlit UI
+
+The optional `ui` extra installs Streamlit:
+
+```bash
+python -m pip install -e '.[ui]'
+deep-research-agent ui
+```
+
+The UI is a local operator surface over the same checkpointed workflow. It
+accepts provider API keys as session-only password inputs, exposes search
+max-results/timeout controls, and previews progress events, evidence, prospects,
+artifact paths, markdown, and raw JSON without persisting secrets.
+
 
 ## G003 local workflow checkpoints
 

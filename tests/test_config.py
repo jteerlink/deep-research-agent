@@ -66,3 +66,17 @@ def test_deep_research_provider_takes_precedence_over_legacy_alias() -> None:
 
     assert config.primary_provider is ModelProvider.OPENAI
     assert config.ollama_native.model == "canonical-model"
+
+
+def test_deep_research_search_knobs_take_precedence_over_legacy_aliases() -> None:
+    config = load_config(
+        {
+            "DEEP_RESEARCH_MAX_SEARCH_RESULTS": "9",
+            "DRA_MAX_SEARCH_RESULTS": "2",
+            "DEEP_RESEARCH_SEARCH_TIMEOUT_SECONDS": "30",
+            "DRA_SEARCH_TIMEOUT_SECONDS": "5",
+        }
+    )
+
+    assert config.search.max_results == 9
+    assert config.search.timeout_seconds == 30

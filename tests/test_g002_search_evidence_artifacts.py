@@ -31,7 +31,7 @@ def test_normalize_search_results_preserves_snippet_vs_page_read_semantics() -> 
     records = normalize_search_results(
         "query",
         [
-            SearchResult("Snippet", "https://example.com/snippet", "short text", provider="brave"),
+            SearchResult("Snippet", "https://example.com/snippet", "short text", provider="ydc"),
             SearchResult("Page", "https://example.com/page", "full page text", provider="exa"),
         ],
     )

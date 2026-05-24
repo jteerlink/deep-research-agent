@@ -193,7 +193,15 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
             ),
         ),
         search=SearchConfig(
-            max_results=_get_int(source, "DRA_MAX_SEARCH_RESULTS", 5),
-            timeout_seconds=_get_int(source, "DRA_SEARCH_TIMEOUT_SECONDS", 10),
+            max_results=_get_int(
+                source,
+                "DEEP_RESEARCH_MAX_SEARCH_RESULTS",
+                _get_int(source, "DRA_MAX_SEARCH_RESULTS", 5),
+            ),
+            timeout_seconds=_get_int(
+                source,
+                "DEEP_RESEARCH_SEARCH_TIMEOUT_SECONDS",
+                _get_int(source, "DRA_SEARCH_TIMEOUT_SECONDS", 10),
+            ),
         ),
     )

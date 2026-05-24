@@ -97,6 +97,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum researcher iterations before sufficiency routing.",
     )
     run_parser.add_argument(
+        "--max-results",
+        type=int,
+        default=5,
+        help="Maximum search results requested per researcher iteration.",
+    )
+    run_parser.add_argument(
         "--approve",
         action="store_true",
         help="Approve review immediately instead of stopping at the review interrupt.",
@@ -145,6 +151,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--checkpoint-dir", help="Directory for local JSON checkpoints.", default=None
     )
     inspect_parser.add_argument("--json", action="store_true", help="Emit checkpoint as JSON.")
+
+    subparsers.add_parser("ui", help="Launch the local Streamlit research UI.")
     return parser
 
 
@@ -200,6 +208,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         checkpoint_dir=args.checkpoint_dir,
                         require_review=not args.approve,
                         max_iterations=args.max_iterations,
+                        max_results=args.max_results,
                         review_approved=args.approve,
                         artifact_dir=args.artifact_dir,
                     )
@@ -225,6 +234,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     search=_mock_search_from_specs(args.mock_result) if args.mock_result else None,
                     require_review=args.require_review,
                     max_iterations=args.max_iterations,
+                    max_results=args.max_results,
                     review_approved=args.approve,
                     artifact_dir=args.artifact_dir,
                 )
@@ -236,6 +246,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.query,
             thread_id=args.thread_id,
             checkpoint_dir=args.checkpoint_dir,
+            max_results=args.max_results,
             artifact_dir=args.artifact_dir,
         )
         _print_json(checkpoint.to_dict())
@@ -286,6 +297,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         checkpoint = inspect_research_thread(thread_id, checkpoint_dir=args.checkpoint_dir)
         _print_json(checkpoint.to_dict())
         return 0
+
+    if args.command == "ui":
+        from .ui import launch_streamlit
+
+        return launch_streamlit()
 
     parser.print_help()
     return 0

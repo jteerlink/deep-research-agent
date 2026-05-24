@@ -1,0 +1,249 @@
+"""Local Streamlit UI for running and inspecting research threads.
+
+The helpers in this module are import-safe and testable without Streamlit. The
+actual Streamlit dependency is imported only when the UI is launched or rendered.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sys
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import asdict, is_dataclass
+from pathlib import Path
+from typing import Any
+
+from async_multi_search import AsyncMultiProviderSearch
+
+from .graph import inspect_checkpoints, resume_research, run_research
+
+PROVIDER_API_KEY_FIELDS: tuple[tuple[str, str], ...] = (
+    ("Tavily", "TAVILY_API_KEY"),
+    ("Exa", "EXA_API_KEY"),
+    ("Serper", "SERPER_API_KEY"),
+    ("Firecrawl", "FIRECRAWL_API_KEY"),
+    ("You.com Developer Cloud", "YDC_API_KEY"),
+)
+
+DEFAULT_CHECKPOINT_DIR = ".deep_research_agent/checkpoints"
+DEFAULT_ARTIFACT_DIR = ".deep_research_agent/artifacts"
+
+
+def _jsonable(value: Any) -> Any:
+    if is_dataclass(value) and not isinstance(value, type):
+        return _jsonable(asdict(value))
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, tuple):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    return value
+
+
+def provider_env_overlay(values: Mapping[str, str]) -> dict[str, str]:
+    """Return non-empty provider key overrides without mutating ``os.environ``."""
+
+    allowed = {env_key for _, env_key in PROVIDER_API_KEY_FIELDS}
+    return {
+        key: value.strip()
+        for key, value in values.items()
+        if key in allowed and isinstance(value, str) and value.strip()
+    }
+
+
+@contextmanager
+def temporary_env(overrides: Mapping[str, str]) -> Iterator[None]:
+    """Apply environment values for one run and restore the previous process state."""
+
+    original: dict[str, str | None] = {key: os.environ.get(key) for key in overrides}
+    try:
+        for key, value in overrides.items():
+            os.environ[key] = value
+        yield
+    finally:
+        for key, previous in original.items():
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
+
+
+def result_preview(state: Mapping[str, Any], markdown_limit: int = 4000) -> dict[str, Any]:
+    """Build the compact, display-safe result preview used by UI and tests."""
+
+    artifact_paths = dict(state.get("artifact_paths", {}))
+    markdown_preview = ""
+    markdown_path = artifact_paths.get("markdown")
+    if markdown_path:
+        path = Path(str(markdown_path))
+        if path.exists():
+            markdown_preview = path.read_text(encoding="utf-8")[:markdown_limit]
+
+    return {
+        "thread_id": state.get("thread_id", ""),
+        "status": state.get("status", ""),
+        "warnings": list(state.get("warnings", [])),
+        "event_count": len(state.get("events", [])),
+        "events": list(state.get("events", []))[-25:],
+        "evidence": list(state.get("evidence", []))[:10],
+        "prospect_targets": list(state.get("prospect_targets", []))[:10],
+        "artifact_paths": artifact_paths,
+        "markdown_preview": markdown_preview,
+        "raw_json": _jsonable(dict(state)),
+    }
+
+
+def launch_streamlit() -> int:
+    """Launch this module with Streamlit's CLI."""
+
+    try:
+        from streamlit.web import cli as streamlit_cli
+    except ImportError:
+        print(
+            "Streamlit is not installed. Install it with: pip install -e '.[ui]'",
+            file=sys.stderr,
+        )
+        return 1
+
+    sys.argv = ["streamlit", "run", str(Path(__file__).resolve())]
+    return int(streamlit_cli.main() or 0)
+
+
+def render_app() -> None:
+    """Render the Streamlit app."""
+
+    import streamlit as st
+
+    st.set_page_config(page_title="Deep Research Agent", layout="wide")
+    st.title("Deep Research Agent")
+    st.caption(
+        "Local execution UI. API keys entered here are session-only and are not written to .env."
+    )
+
+    if "events" not in st.session_state:
+        st.session_state.events = []
+    if "last_state" not in st.session_state:
+        st.session_state.last_state = None
+
+    with st.sidebar:
+        st.header("Execution")
+        query = st.text_area("Query", "AI agency lead reactivation targets")
+        thread_id = st.text_input("Thread ID", "")
+        max_iterations = st.number_input("Max iterations", min_value=1, max_value=25, value=3)
+        checkpoint_dir = st.text_input("Checkpoint dir", DEFAULT_CHECKPOINT_DIR)
+        artifact_dir = st.text_input("Artifact dir", DEFAULT_ARTIFACT_DIR)
+        require_review = st.checkbox("Require review", value=True)
+        approve_review = st.checkbox("Approve review", value=False)
+
+        st.header("Search")
+        search_max_results = st.number_input(
+            "Search max results", min_value=1, max_value=100, value=5
+        )
+        timeout_seconds = st.number_input(
+            "Search timeout seconds", min_value=1, max_value=120, value=10
+        )
+
+        st.header("Provider API keys")
+        raw_keys = {
+            env_key: st.text_input(label, type="password", key=f"provider_key_{env_key}")
+            for label, env_key in PROVIDER_API_KEY_FIELDS
+        }
+        provider_keys = provider_env_overlay(raw_keys)
+
+        run_clicked = st.button("Run", type="primary", use_container_width=True)
+        resume_clicked = st.button("Resume", use_container_width=True)
+        inspect_clicked = st.button("Inspect", use_container_width=True)
+
+    def progress(event: dict[str, Any]) -> None:
+        st.session_state.events.append(event)
+
+    try:
+        if run_clicked:
+            st.session_state.events = []
+            searcher = AsyncMultiProviderSearch(timeout=int(timeout_seconds))
+            with temporary_env(provider_keys):
+                state = asyncio.run(
+                    run_research(
+                        query,
+                        thread_id=thread_id or None,
+                        checkpoint_dir=checkpoint_dir,
+                        search=searcher.search,
+                        require_review=require_review,
+                        max_iterations=int(max_iterations),
+                        max_results=int(search_max_results),
+                        progress_callback=progress,
+                        review_approved=approve_review,
+                        artifact_dir=artifact_dir,
+                    )
+                )
+            st.session_state.last_state = state
+            st.success(f"Run {state.get('status', 'finished')}: {state.get('thread_id')}")
+
+        if resume_clicked:
+            if not thread_id:
+                st.error("Thread ID is required to resume.")
+            else:
+                st.session_state.events = []
+                searcher = AsyncMultiProviderSearch(timeout=int(timeout_seconds))
+                with temporary_env(provider_keys):
+                    state = asyncio.run(
+                        resume_research(
+                            thread_id,
+                            checkpoint_dir=checkpoint_dir,
+                            approve_review=approve_review,
+                            search=searcher.search,
+                            max_results=int(search_max_results),
+                            progress_callback=progress,
+                            artifact_dir=artifact_dir,
+                        )
+                    )
+                st.session_state.last_state = state
+                st.success(f"Resumed {state.get('status', 'finished')}: {thread_id}")
+
+        if inspect_clicked:
+            if not thread_id:
+                st.error("Thread ID is required to inspect.")
+            else:
+                state = inspect_checkpoints(thread_id, checkpoint_dir=checkpoint_dir)
+                st.session_state.last_state = state
+                st.info(f"Loaded checkpoint: {thread_id}")
+    except Exception as exc:  # pragma: no cover - exercised manually through Streamlit
+        st.exception(exc)
+
+    state = st.session_state.last_state
+    preview = result_preview(state or {})
+
+    status_col, warning_col, artifact_col = st.columns(3)
+    status_col.metric("Status", str(preview["status"] or "not run"))
+    warning_col.metric("Warnings", len(preview["warnings"]))
+    artifact_col.metric("Artifacts", len(preview["artifact_paths"]))
+
+    tabs = st.tabs(["Timeline", "Evidence", "Prospects", "Artifacts", "Markdown", "Raw JSON"])
+    with tabs[0]:
+        st.subheader("Progress events")
+        st.json(st.session_state.events or preview["events"])
+    with tabs[1]:
+        st.subheader("Evidence preview")
+        st.dataframe(preview["evidence"], use_container_width=True)
+    with tabs[2]:
+        st.subheader("Prospect preview")
+        st.dataframe(preview["prospect_targets"], use_container_width=True)
+    with tabs[3]:
+        st.subheader("Artifact paths")
+        st.json(preview["artifact_paths"])
+    with tabs[4]:
+        st.subheader("Markdown preview")
+        st.markdown(preview["markdown_preview"] or "_No markdown artifact yet._")
+    with tabs[5]:
+        st.subheader("Raw state JSON")
+        st.code(json.dumps(preview["raw_json"], indent=2, sort_keys=True), language="json")
+
+
+if __name__ == "__main__":
+    render_app()

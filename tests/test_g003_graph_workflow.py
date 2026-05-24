@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import sys
 
+from async_multi_search import SearchResult
 from deep_research_agent.graph import (
     CHECKPOINT_SCHEMA_VERSION,
     GRAPH_TOPOLOGY,
@@ -12,6 +14,7 @@ from deep_research_agent.graph import (
     inspect_thread,
     resume_thread,
     run_query,
+    run_research,
 )
 
 
@@ -116,3 +119,45 @@ def test_cli_run_resume_inspect_flow_uses_fixed_thread_id(tmp_path) -> None:
     inspect_payload = json.loads(inspect.stdout)
     assert inspect_payload["thread_id"] == "cli-thread"
     assert inspect_payload["state"]["review_status"] == "approved"
+
+
+def test_run_research_passes_max_results_and_emits_progress_events(tmp_path) -> None:
+    requested_max_results: list[int] = []
+    progress_events: list[dict[str, object]] = []
+
+    async def search(query: str, max_results: int):
+        requested_max_results.append(max_results)
+        return [
+            SearchResult(
+                "Acme",
+                "https://example.com/acme",
+                f"{query} search snippet",
+                provider="firecrawl",
+            )
+        ]
+
+    state = asyncio.run(
+        run_research(
+            "find prospects",
+            thread_id="progress-thread",
+            checkpoint_dir=tmp_path,
+            search=search,
+            require_review=True,
+            max_results=7,
+            progress_callback=progress_events.append,
+        )
+    )
+
+    assert requested_max_results == [7]
+    assert state["max_results"] == 7
+    assert state["status"] == "interrupted"
+    assert [event["event"] for event in progress_events] == [
+        "main_started",
+        "supervisor_delegated",
+        "search_started",
+        "search_completed",
+        "fallback_model_used",
+        "researcher_iteration",
+        "sufficiency_routed",
+        "review_interrupt",
+    ]

@@ -13,7 +13,8 @@ Plug-in usage:
     results = await web_search("mixture-of-experts routing tricks")
 
 Keys (set whichever you have):
-    TAVILY_API_KEY, EXA_API_KEY, BRAVE_API_KEY, SERPER_API_KEY
+    TAVILY_API_KEY, EXA_API_KEY, SERPER_API_KEY, FIRECRAWL_API_KEY,
+    YDC_API_KEY
 DuckDuckGo needs no key and sits last as the always-available fallback
 (pip install httpx ddgs).
 """
@@ -116,29 +117,6 @@ class ExaProvider(SearchProvider):
         ]
 
 
-class BraveProvider(SearchProvider):
-    name = "brave"
-    env_key = "BRAVE_API_KEY"
-
-    async def search(self, client, query, max_results):
-        resp = await client.get(
-            "https://api.search.brave.com/res/v1/web/search",
-            headers={
-                "Accept": "application/json",
-                "X-Subscription-Token": os.environ[self.env_key],
-            },
-            params={"q": query, "count": max_results},
-        )
-        resp.raise_for_status()
-        hits = resp.json().get("web", {}).get("results", [])
-        return [
-            SearchResult(
-                h.get("title", ""), h.get("url", ""), h.get("description", ""), None, self.name
-            )
-            for h in hits
-        ]
-
-
 class SerperProvider(SearchProvider):
     name = "serper"
     env_key = "SERPER_API_KEY"
@@ -155,6 +133,72 @@ class SerperProvider(SearchProvider):
                 h.get("title", ""), h.get("link", ""), h.get("snippet", ""), None, self.name
             )
             for h in resp.json().get("organic", [])
+        ]
+
+
+class FirecrawlProvider(SearchProvider):
+    """Firecrawl v2 search adapter.
+
+    The first-pass integration intentionally requests SERP-style web results
+    only. It does not opt into Firecrawl scrape formats, so normalized content
+    remains snippet/description evidence rather than a page read.
+    """
+
+    name = "firecrawl"
+    env_key = "FIRECRAWL_API_KEY"
+
+    async def search(self, client, query, max_results):
+        resp = await client.post(
+            "https://api.firecrawl.dev/v2/search",
+            headers={
+                "Authorization": f"Bearer {os.environ[self.env_key]}",
+                "Content-Type": "application/json",
+            },
+            json={"query": query, "limit": max_results, "sources": ["web"]},
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        if payload.get("success") is False:
+            raise RuntimeError(f"firecrawl search failed: {payload}")
+        hits = payload.get("data", {}).get("web", [])
+        return [
+            SearchResult(
+                h.get("title", ""),
+                h.get("url", ""),
+                h.get("description", h.get("snippet", "")) or "",
+                None,
+                self.name,
+            )
+            for h in hits
+        ]
+
+
+class YdcProvider(SearchProvider):
+    """You.com Developer Cloud Search API adapter."""
+
+    name = "ydc"
+    env_key = "YDC_API_KEY"
+
+    async def search(self, client, query, max_results):
+        resp = await client.post(
+            "https://ydc-index.io/v1/search",
+            headers={
+                "X-API-Key": os.environ[self.env_key],
+                "Content-Type": "application/json",
+            },
+            json={"query": query, "count": max_results},
+        )
+        resp.raise_for_status()
+        hits = resp.json().get("results", {}).get("web", [])
+        return [
+            SearchResult(
+                h.get("title", ""),
+                h.get("url", ""),
+                h.get("description", "") or "",
+                None,
+                self.name,
+            )
+            for h in hits
         ]
 
 
@@ -189,9 +233,10 @@ class AsyncMultiProviderSearch:
         # Order = priority. Keyless DuckDuckGo sits last as a safety net.
         self.providers = providers or [
             TavilyProvider(),
-            BraveProvider(),
             ExaProvider(),
             SerperProvider(),
+            FirecrawlProvider(),
+            YdcProvider(),
             DuckDuckGoProvider(),
         ]
         self.treat_empty_as_failure = treat_empty_as_failure
