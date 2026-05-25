@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,3 +60,9 @@ def test_foundation_docs_preserve_scope_and_import_compatibility() -> None:
     assert "no database" in development_doc.lower()
     assert ".omx/ultragoal" not in foundation_doc
     assert ".omx/ultragoal" not in development_doc
+
+
+def test_ui_extra_includes_keyless_search_fallback_dependency() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+
+    assert "ddgs>=9.0" in pyproject["project"]["optional-dependencies"]["ui"]

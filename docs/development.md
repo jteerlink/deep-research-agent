@@ -13,8 +13,8 @@
    `python -m deep_research_agent resume demo-thread --artifact-dir artifacts/demo --approve-review`, and
    `python -m deep_research_agent inspect --thread-id demo-thread`.
 6. For the optional local UI, install `python -m pip install -e '.[ui]'` and
-   launch `deep-research-agent ui`. Keep provider keys in the UI password fields
-   or local environment; do not commit them.
+   launch `deep-research-agent ui`. Keep provider keys in `.env` or local
+   environment; do not commit them.
 7. Run a LangGraph dev server from the repository root after dependencies are
    installed: `langgraph dev`.
 

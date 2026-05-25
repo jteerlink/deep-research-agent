@@ -18,7 +18,15 @@ from typing import Any
 
 from async_multi_search import AsyncMultiProviderSearch
 
-from .graph import inspect_checkpoints, resume_research, run_research
+try:
+    from .config import dotenv_values
+    from .graph import inspect_checkpoints, resume_research, run_research
+except ImportError:
+    if __package__:
+        raise
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from deep_research_agent.config import dotenv_values
+    from deep_research_agent.graph import inspect_checkpoints, resume_research, run_research
 
 PROVIDER_API_KEY_FIELDS: tuple[tuple[str, str], ...] = (
     ("Tavily", "TAVILY_API_KEY"),
@@ -55,6 +63,29 @@ def provider_env_overlay(values: Mapping[str, str]) -> dict[str, str]:
         for key, value in values.items()
         if key in allowed and isinstance(value, str) and value.strip()
     }
+
+
+def provider_env_from_env_file(
+    path: str | os.PathLike[str] = ".env",
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return provider keys from shell environment plus ``.env`` values."""
+
+    current = os.environ if environ is None else environ
+    merged = dotenv_values(path) if os.fspath(path).strip() else {}
+    merged.update(current)
+    return provider_env_overlay(merged)
+
+
+def env_file_overlay(
+    path: str | os.PathLike[str] = ".env",
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return non-empty ``.env`` values that are not already exported."""
+
+    current = os.environ if environ is None else environ
+    values = dotenv_values(path) if os.fspath(path).strip() else {}
+    return {key: value for key, value in values.items() if value and key not in current}
 
 
 @contextmanager
@@ -122,9 +153,7 @@ def render_app() -> None:
 
     st.set_page_config(page_title="Deep Research Agent", layout="wide")
     st.title("Deep Research Agent")
-    st.caption(
-        "Local execution UI. API keys entered here are session-only and are not written to .env."
-    )
+    st.caption("Local execution UI. Provider API keys are read from .env or shell env.")
 
     if "events" not in st.session_state:
         st.session_state.events = []
@@ -149,16 +178,22 @@ def render_app() -> None:
             "Search timeout seconds", min_value=1, max_value=120, value=10
         )
 
-        st.header("Provider API keys")
-        raw_keys = {
-            env_key: st.text_input(label, type="password", key=f"provider_key_{env_key}")
-            for label, env_key in PROVIDER_API_KEY_FIELDS
-        }
-        provider_keys = provider_env_overlay(raw_keys)
+        st.header("Environment")
+        env_file = st.text_input("Env file", ".env")
+        runtime_env = env_file_overlay(env_file)
+        provider_keys = provider_env_from_env_file(env_file)
+        configured = [
+            label for label, env_key in PROVIDER_API_KEY_FIELDS if env_key in provider_keys
+        ]
+        missing = [
+            label for label, env_key in PROVIDER_API_KEY_FIELDS if env_key not in provider_keys
+        ]
+        st.caption(f"Configured providers: {', '.join(configured) if configured else 'none'}")
+        st.caption(f"Missing provider keys: {', '.join(missing) if missing else 'none'}")
 
-        run_clicked = st.button("Run", type="primary", use_container_width=True)
-        resume_clicked = st.button("Resume", use_container_width=True)
-        inspect_clicked = st.button("Inspect", use_container_width=True)
+        run_clicked = st.button("Run", type="primary", width="stretch")
+        resume_clicked = st.button("Resume", width="stretch")
+        inspect_clicked = st.button("Inspect", width="stretch")
 
     def progress(event: dict[str, Any]) -> None:
         st.session_state.events.append(event)
@@ -167,7 +202,7 @@ def render_app() -> None:
         if run_clicked:
             st.session_state.events = []
             searcher = AsyncMultiProviderSearch(timeout=int(timeout_seconds))
-            with temporary_env(provider_keys):
+            with temporary_env(runtime_env):
                 state = asyncio.run(
                     run_research(
                         query,
@@ -191,7 +226,7 @@ def render_app() -> None:
             else:
                 st.session_state.events = []
                 searcher = AsyncMultiProviderSearch(timeout=int(timeout_seconds))
-                with temporary_env(provider_keys):
+                with temporary_env(runtime_env):
                     state = asyncio.run(
                         resume_research(
                             thread_id,
@@ -230,10 +265,10 @@ def render_app() -> None:
         st.json(st.session_state.events or preview["events"])
     with tabs[1]:
         st.subheader("Evidence preview")
-        st.dataframe(preview["evidence"], use_container_width=True)
+        st.dataframe(preview["evidence"], width="stretch")
     with tabs[2]:
         st.subheader("Prospect preview")
-        st.dataframe(preview["prospect_targets"], use_container_width=True)
+        st.dataframe(preview["prospect_targets"], width="stretch")
     with tabs[3]:
         st.subheader("Artifact paths")
         st.json(preview["artifact_paths"])

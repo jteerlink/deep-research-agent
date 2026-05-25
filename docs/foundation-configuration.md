@@ -41,6 +41,9 @@ Provider priority is `tavily`, `exa`, `serper`, `firecrawl`, `ydc`, then
 keyless `duckduckgo`. Firecrawl is enabled with `FIRECRAWL_API_KEY`; You.com
 Developer Cloud search is enabled with `YDC_API_KEY`. Both are normalized as
 snippet evidence unless a later browser/page-read step captures page content.
+For corporate proxy roots, set `DEEP_RESEARCH_CA_BUNDLE` to a PEM bundle. On
+macOS, live search will otherwise try a cached bundle generated from the system
+keychain.
 
 ## Local Streamlit UI
 
@@ -52,9 +55,9 @@ deep-research-agent ui
 ```
 
 The UI is a local operator surface over the same checkpointed workflow. It
-accepts provider API keys as session-only password inputs, exposes search
+reads provider API keys from `.env` or shell environment, exposes search
 max-results/timeout controls, and previews progress events, evidence, prospects,
-artifact paths, markdown, and raw JSON without persisting secrets.
+artifact paths, markdown, and raw JSON without asking for secrets in the browser.
 
 
 ## G003 local workflow checkpoints

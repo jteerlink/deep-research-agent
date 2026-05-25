@@ -25,8 +25,13 @@ import argparse
 import asyncio
 import logging
 import os
+import subprocess
+import sys
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
+from typing import TypeAlias
 
 import httpx
 
@@ -34,6 +39,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 10  # seconds per attempt
 DEFAULT_MAX_RESULTS = 5
+CA_BUNDLE_ENV_KEYS = ("DEEP_RESEARCH_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
+VerifySetting: TypeAlias = bool | str
 
 
 @dataclass
@@ -49,6 +56,56 @@ class SearchResult:
 
 class AllProvidersFailedError(Exception):
     """Raised when every configured provider in the chain failed."""
+
+
+def _explicit_ca_bundle(environ: Mapping[str, str] = os.environ) -> str | None:
+    for key in CA_BUNDLE_ENV_KEYS:
+        value = environ.get(key, "").strip()
+        if value:
+            return value
+    return None
+
+
+def _macos_keychain_ca_bundle(
+    environ: Mapping[str, str] = os.environ,
+) -> str | None:
+    if sys.platform != "darwin":
+        return None
+    if environ.get("DEEP_RESEARCH_DISABLE_MACOS_KEYCHAIN_CA", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return None
+
+    cache_dir = Path(environ.get("DEEP_RESEARCH_CACHE_DIR", ".deep_research_agent/cache"))
+    bundle_path = cache_dir / "macos-system-ca-bundle.pem"
+    if bundle_path.exists() and bundle_path.stat().st_size > 0:
+        return str(bundle_path)
+
+    keychains = [
+        "/System/Library/Keychains/SystemRootCertificates.keychain",
+        "/Library/Keychains/System.keychain",
+    ]
+    try:
+        result = subprocess.run(
+            ["security", "find-certificate", "-a", "-p", *keychains],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        if "BEGIN CERTIFICATE" not in result.stdout:
+            return None
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        bundle_path.write_text(result.stdout, encoding="utf-8")
+    except Exception as exc:
+        logger.debug("macOS keychain CA export failed: %s", exc)
+        return None
+    return str(bundle_path)
+
+
+def _default_verify_setting() -> VerifySetting:
+    return _explicit_ca_bundle() or _macos_keychain_ca_bundle() or True
 
 
 # --------------------------------------------------------------------------- #
@@ -211,7 +268,7 @@ class DuckDuckGoProvider(SearchProvider):
 
     def _sync_search(self, query, max_results):
         try:
-            from ddgs import DDGS  # type: ignore[import-not-found]  # noqa: I001
+            from ddgs import DDGS  # noqa: I001
         except ImportError:
             from duckduckgo_search import DDGS  # type: ignore[import-not-found]  # noqa: I001
         with DDGS() as ddgs:
@@ -229,7 +286,13 @@ class DuckDuckGoProvider(SearchProvider):
 # Dispatcher
 # --------------------------------------------------------------------------- #
 class AsyncMultiProviderSearch:
-    def __init__(self, providers=None, treat_empty_as_failure=True, timeout=DEFAULT_TIMEOUT):
+    def __init__(
+        self,
+        providers=None,
+        treat_empty_as_failure=True,
+        timeout=DEFAULT_TIMEOUT,
+        verify: VerifySetting | None = None,
+    ):
         # Order = priority. Keyless DuckDuckGo sits last as a safety net.
         self.providers = providers or [
             TavilyProvider(),
@@ -241,6 +304,7 @@ class AsyncMultiProviderSearch:
         ]
         self.treat_empty_as_failure = treat_empty_as_failure
         self.timeout = timeout
+        self.verify = verify
 
     async def _attempt(self, client, provider, query, max_results):
         """Run one provider, retrying exactly once on timeout."""
@@ -252,7 +316,8 @@ class AsyncMultiProviderSearch:
 
     async def search(self, query, max_results=DEFAULT_MAX_RESULTS):
         errors = []
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        verify = _default_verify_setting() if self.verify is None else self.verify
+        async with httpx.AsyncClient(timeout=self.timeout, verify=verify) as client:
             for p in self.providers:
                 if not p.configured:
                     logger.info("skip %s (no key)", p.name)

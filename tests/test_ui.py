@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import importlib.util
 import os
+from pathlib import Path
 
-from deep_research_agent.ui import provider_env_overlay, result_preview, temporary_env
+from deep_research_agent.ui import (
+    env_file_overlay,
+    provider_env_from_env_file,
+    provider_env_overlay,
+    result_preview,
+    temporary_env,
+)
 
 
 def test_provider_env_overlay_keeps_only_non_empty_supported_keys() -> None:
@@ -15,6 +23,42 @@ def test_provider_env_overlay_keeps_only_non_empty_supported_keys() -> None:
     )
 
     assert overlay == {"FIRECRAWL_API_KEY": "fc-test"}
+
+
+def test_provider_env_from_env_file_preserves_shell_precedence(tmp_path, monkeypatch) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "TAVILY_API_KEY=from-dotenv\nFIRECRAWL_API_KEY=from-dotenv-firecrawl\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TAVILY_API_KEY", "from-shell")
+
+    overlay = provider_env_from_env_file(dotenv)
+
+    assert overlay == {
+        "TAVILY_API_KEY": "from-shell",
+        "FIRECRAWL_API_KEY": "from-dotenv-firecrawl",
+    }
+
+
+def test_env_file_overlay_loads_non_exported_runtime_values(tmp_path, monkeypatch) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "TAVILY_API_KEY=from-dotenv\n"
+        "SSL_CERT_FILE=/tmp/corp-ca.pem\n"
+        "REQUESTS_CA_BUNDLE=/tmp/requests-ca.pem\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TAVILY_API_KEY", "from-shell")
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+
+    overlay = env_file_overlay(dotenv)
+
+    assert overlay == {
+        "SSL_CERT_FILE": "/tmp/corp-ca.pem",
+        "REQUESTS_CA_BUNDLE": "/tmp/requests-ca.pem",
+    }
 
 
 def test_temporary_env_restores_secret_values(monkeypatch) -> None:
@@ -49,3 +93,15 @@ def test_result_preview_reads_markdown_and_limits_lists(tmp_path) -> None:
     assert len(preview["evidence"]) == 10
     assert len(preview["prospect_targets"]) == 10
     assert preview["markdown_preview"].startswith("# Artifact")
+
+
+def test_ui_imports_when_loaded_as_streamlit_script() -> None:
+    path = Path(__file__).resolve().parents[1] / "deep_research_agent" / "ui.py"
+    spec = importlib.util.spec_from_file_location("streamlit_script_ui", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+
+    spec.loader.exec_module(module)
+
+    assert module.DEFAULT_CHECKPOINT_DIR == ".deep_research_agent/checkpoints"

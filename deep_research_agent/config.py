@@ -115,9 +115,9 @@ def _provider(value: str) -> ModelProvider:
 
 
 
-def _dotenv_values(path: str | os.PathLike[str] = ".env") -> dict[str, str]:
+def dotenv_values(path: str | os.PathLike[str] = ".env") -> dict[str, str]:
     dotenv = os.fspath(path)
-    if not os.path.exists(dotenv):
+    if not os.path.isfile(dotenv):
         return {}
     values: dict[str, str] = {}
     with open(dotenv, encoding="utf-8") as handle:
@@ -125,13 +125,15 @@ def _dotenv_values(path: str | os.PathLike[str] = ".env") -> dict[str, str]:
             stripped = line.strip()
             if not stripped or stripped.startswith("#") or "=" not in stripped:
                 continue
+            if stripped.startswith("export "):
+                stripped = stripped.removeprefix("export ").strip()
             key, value = stripped.split("=", 1)
             values[key.strip()] = value.strip().strip('"').strip("'")
     return values
 
 
 def _merged_environment() -> Mapping[str, str]:
-    merged = _dotenv_values()
+    merged = dotenv_values()
     merged.update(os.environ)
     return merged
 

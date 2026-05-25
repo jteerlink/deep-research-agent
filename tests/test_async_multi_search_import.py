@@ -53,6 +53,18 @@ def test_search_provider_configured_uses_only_its_declared_env_key(monkeypatch):
     }
 
 
+def test_ca_bundle_resolution_prefers_deep_research_env(monkeypatch, tmp_path):
+    module = importlib.import_module("async_multi_search")
+    ca_bundle = tmp_path / "ca.pem"
+    ca_bundle.write_text("test-ca", encoding="utf-8")
+
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", "requests-ca.pem")
+    monkeypatch.setenv("SSL_CERT_FILE", "ssl-ca.pem")
+    monkeypatch.setenv("DEEP_RESEARCH_CA_BUNDLE", str(ca_bundle))
+
+    assert module._explicit_ca_bundle() == str(ca_bundle)
+
+
 def test_firecrawl_provider_maps_v2_web_results_without_scraped_content(monkeypatch):
     module = importlib.import_module("async_multi_search")
     monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-test")

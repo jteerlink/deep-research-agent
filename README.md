@@ -24,8 +24,8 @@ python -m pip install -e '.[ui]'
 deep-research-agent ui
 ```
 
-The UI accepts provider keys as password fields for the current run only; it
-does not write secrets to `.env`.
+The UI reads provider keys from `.env` or already-exported shell environment
+variables; it does not ask for secrets in the browser.
 
 ## Local G003 workflow
 
@@ -82,4 +82,7 @@ OpenAI-compatible API surface:
 Search provider keys remain compatible with the standalone module:
 `TAVILY_API_KEY`, `EXA_API_KEY`, `SERPER_API_KEY`, `FIRECRAWL_API_KEY`, and
 `YDC_API_KEY`. Provider priority is `tavily`, `exa`, `serper`, `firecrawl`,
-`ydc`, then keyless `duckduckgo`.
+`ydc`, then keyless `duckduckgo`. If a corporate proxy causes certificate
+verification failures, set `DEEP_RESEARCH_CA_BUNDLE` to a PEM bundle; on macOS,
+the search client auto-generates a local bundle from the system keychain when no
+explicit bundle is configured.

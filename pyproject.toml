@@ -24,6 +24,7 @@ langgraph = [
   "langgraph>=0.2",
 ]
 ui = [
+  "ddgs>=9.0",
   "streamlit>=1.36",
 ]
 dev = [

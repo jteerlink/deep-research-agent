@@ -34,6 +34,11 @@ enable You.com Developer Cloud Search. These integrations use web search result
 descriptions/snippets only; they do not request scraped markdown or page
 content.
 
+If live search fails with `CERTIFICATE_VERIFY_FAILED` behind a corporate proxy,
+set `DEEP_RESEARCH_CA_BUNDLE` to a PEM bundle. On macOS, the search client will
+try to generate a local CA bundle from the system keychain when no explicit
+bundle is configured.
+
 ## Optional local UI
 
 Install and launch the Streamlit UI:
@@ -45,10 +50,9 @@ deep-research-agent ui
 
 The UI supports query/thread settings, max iterations, checkpoint/artifact
 directories, review approval, search max results/timeout, provider API key
-password fields, run/resume/inspect buttons, a progress timeline, warnings,
-evidence/prospect previews, artifact paths, markdown preview, and raw JSON.
-Provider keys entered in the UI are applied only to the current process/session
-and are not written to `.env`.
+status from `.env` or shell environment, run/resume/inspect buttons, a progress
+timeline, warnings, evidence/prospect previews, artifact paths, markdown
+preview, and raw JSON. Provider keys are not typed into the UI.
 
 ## Model configuration
 
