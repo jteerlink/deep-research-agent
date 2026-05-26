@@ -6,6 +6,7 @@ from pathlib import Path
 
 from deep_research_agent.ui import (
     build_prospect_directive,
+    build_tiered_preview,
     env_file_overlay,
     model_preflight_from_env_file,
     preview_geography_scope,
@@ -86,6 +87,25 @@ def test_build_prospect_directive_includes_business_target_context() -> None:
         "geography: Dallas-Fort Worth\n"
         "criteria: patient reactivation opportunity"
     )
+
+
+def test_build_tiered_preview_is_offline_and_query_shaped() -> None:
+    preview = build_tiered_preview(
+        "dental",
+        "DFW area",
+        "multi-location",
+        target_prospect_count=3,
+        preferred_contact_roles=("owner",),
+    )
+
+    assert preview["directive"]["target_prospect_count"] == 3
+    assert preview["search_dependency"] == "injected"
+    assert preview["company_discovery_queries"][:2] == [
+        "dental companies in DFW area",
+        "best dental DFW area",
+    ]
+    assert "Example Company owner" in preview["contact_discovery_query_templates"]
+    assert preview["warnings"]
 
 
 def test_preview_geography_scope_expands_known_regions() -> None:

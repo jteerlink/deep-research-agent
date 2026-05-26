@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -27,6 +27,14 @@ from .graph import (
     run_research_workflow,
 )
 from .models import ModelPreflightError, build_model_client
+from .tiered_search import (
+    CompanySearchTarget,
+    ContactSearchTarget,
+    TieredSearchDirective,
+    build_company_discovery_queries,
+    build_contact_discovery_queries,
+    build_personalization_queries,
+)
 
 
 def _checkpoint_payload(checkpoint: object) -> str:
@@ -83,6 +91,44 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "search-providers",
         help="List async_multi_search.py provider order and required environment keys.",
+    )
+
+    tiered_preview_parser = subparsers.add_parser(
+        "tiered-preview",
+        help=(
+            "Preview the tiered prospect directive and early search queries "
+            "without network calls."
+        ),
+    )
+    tiered_preview_parser.add_argument("--industry", required=True, help="Target industry/niche.")
+    tiered_preview_parser.add_argument("--geography", required=True, help="Target geography.")
+    tiered_preview_parser.add_argument(
+        "--criteria",
+        default="",
+        help="Freeform prospecting criteria to preserve in the directive.",
+    )
+    tiered_preview_parser.add_argument(
+        "--target-prospect-count",
+        type=int,
+        default=DEFAULT_TARGET_PROSPECT_COUNT,
+        help="Requested company count after qualification.",
+    )
+    tiered_preview_parser.add_argument(
+        "--preferred-contact-role",
+        action="append",
+        default=[],
+        help="Preferred contact role; repeat for multiple roles.",
+    )
+    tiered_preview_parser.add_argument(
+        "--source-preference",
+        action="append",
+        default=[],
+        help="Preferred source family; repeat for multiple source hints.",
+    )
+    tiered_preview_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit preview as JSON instead of a text summary.",
     )
 
     model_status_parser = subparsers.add_parser(
@@ -233,6 +279,84 @@ def _mock_search_from_specs(specs: Sequence[str]):
     return search
 
 
+
+def build_tiered_preview_payload(args: argparse.Namespace) -> dict[str, Any]:
+    """Build an offline tiered prospect preview for CLI/UI wiring."""
+
+    directive = TieredSearchDirective(
+        industry=args.industry,
+        geographic_area=args.geography,
+        target_prospect_count=args.target_prospect_count,
+        research_criteria=args.criteria,
+        preferred_contact_roles=tuple(args.preferred_contact_role or ()),
+        source_preferences=tuple(args.source_preference or ()),
+    )
+    example_company = CompanySearchTarget("Example Company", website="https://example.com")
+    example_contact = ContactSearchTarget(
+        "Example Contact",
+        "Example Company",
+        title=(
+            directive.preferred_contact_roles[0]
+            if directive.preferred_contact_roles
+            else "Owner"
+        ),
+    )
+    return {
+        "directive": asdict(directive),
+        "tiers": {
+            "company_discovery": {
+                "queries": list(build_company_discovery_queries(directive)),
+                "search_dependency": "injected",
+                "excludes_default_async_multi_provider_chain": True,
+            },
+            "contact_discovery": {
+                "example_company": asdict(example_company),
+                "query_templates": list(
+                    build_contact_discovery_queries(directive, example_company)
+                ),
+                "search_dependency": "injected",
+            },
+            "personalization": {
+                "example_contact": asdict(example_contact),
+                "query_templates": list(
+                    build_personalization_queries(directive, example_contact)
+                ),
+                "search_dependency": "injected",
+            },
+        },
+        "warnings": [
+            "Preview only: no network search, browser capture, enrichment, "
+            "or outreach is executed.",
+            "Early tiered discovery requires an injected search callable and excludes "
+            "the legacy default provider chain.",
+        ],
+        "artifact_plan": [
+            "tiered_prospect_research.json",
+            "companies.csv",
+            "contacts.csv",
+            "personalization.csv",
+            "research_report.md",
+        ],
+    }
+
+
+def _print_tiered_preview(payload: Mapping[str, Any]) -> None:
+    directive = payload["directive"]
+    print(
+        "directive="
+        f"{directive['industry']} | {directive['geographic_area']} | "
+        f"target={directive['target_prospect_count']}"
+    )
+    tiers = payload["tiers"]
+    for tier_name, tier_payload in tiers.items():
+        queries = tier_payload.get("queries") or tier_payload.get("query_templates") or []
+        print(f"{tier_name}:")
+        for query in queries:
+            print(f"- {query}")
+    for warning in payload["warnings"]:
+        print(f"warning: {warning}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -254,6 +378,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         for provider in AsyncMultiProviderSearch().providers:
             print(f"{provider.name}: {provider.env_key or 'no key required'}")
+        return 0
+
+    if args.command == "tiered-preview":
+        try:
+            payload = build_tiered_preview_payload(args)
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.json:
+            _print_json(payload)
+        else:
+            _print_tiered_preview(payload)
         return 0
 
     if args.command == "model-status":

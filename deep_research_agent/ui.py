@@ -34,6 +34,14 @@ try:
         run_research,
     )
     from .models import build_model_client
+    from .tiered_search import (
+        CompanySearchTarget,
+        ContactSearchTarget,
+        TieredSearchDirective,
+        build_company_discovery_queries,
+        build_contact_discovery_queries,
+        build_personalization_queries,
+    )
 except ImportError:
     if __package__:
         raise
@@ -53,6 +61,14 @@ except ImportError:
         run_research,
     )
     from deep_research_agent.models import build_model_client
+    from deep_research_agent.tiered_search import (
+        CompanySearchTarget,
+        ContactSearchTarget,
+        TieredSearchDirective,
+        build_company_discovery_queries,
+        build_contact_discovery_queries,
+        build_personalization_queries,
+    )
 
 PROVIDER_API_KEY_FIELDS: tuple[tuple[str, str], ...] = (
     ("Tavily", "TAVILY_API_KEY"),
@@ -115,6 +131,47 @@ def build_prospect_directive(industry: str, geography: str, criteria: str) -> st
         parts.append(f"criteria: {criteria.strip()}")
     return "\n".join(parts) if parts else "criteria: business prospects"
 
+
+
+def build_tiered_preview(
+    industry: str,
+    geography: str,
+    criteria: str,
+    *,
+    target_prospect_count: int = DEFAULT_TARGET_PROSPECT_COUNT,
+    preferred_contact_roles: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Build an offline tiered prospect preview for UI display and tests."""
+
+    directive = TieredSearchDirective(
+        industry=industry,
+        geographic_area=geography,
+        target_prospect_count=target_prospect_count,
+        research_criteria=criteria,
+        preferred_contact_roles=preferred_contact_roles,
+    )
+    example_company = CompanySearchTarget("Example Company", website="https://example.com")
+    example_contact = ContactSearchTarget(
+        "Example Contact",
+        "Example Company",
+        title=(preferred_contact_roles[0] if preferred_contact_roles else "Owner"),
+    )
+    return {
+        "directive": asdict(directive),
+        "company_discovery_queries": list(build_company_discovery_queries(directive)),
+        "contact_discovery_query_templates": list(
+            build_contact_discovery_queries(directive, example_company)
+        ),
+        "personalization_query_templates": list(
+            build_personalization_queries(directive, example_contact)
+        ),
+        "search_dependency": "injected",
+        "warnings": [
+            "Preview only: no network search, browser capture, enrichment, "
+            "or outreach is executed.",
+            "Early tiered discovery excludes the legacy default provider chain.",
+        ],
+    }
 
 def preview_geography_scope(geography: str) -> dict[str, Any]:
     """Return display-safe geography normalization details for the UI."""
@@ -246,6 +303,15 @@ def render_app() -> None:
         )
         for warning in derived_budget.warnings:
             st.warning(warning)
+        tiered_preview = build_tiered_preview(
+            industry,
+            geography,
+            query,
+            target_prospect_count=int(target_prospect_count),
+        )
+        with st.expander("Tiered prospect preview", expanded=False):
+            st.caption("Offline preview: no search, browser capture, enrichment, or outreach runs.")
+            st.json(tiered_preview)
         with st.expander("Advanced budget"):
             override_budget = st.checkbox("Override derived budget", value=False)
             if override_budget:
