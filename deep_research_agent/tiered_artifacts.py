@@ -13,7 +13,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 TIERED_ARTIFACT_SCHEMA_VERSION = "g001.tiered_prospect_research.v1"
 
@@ -175,25 +175,39 @@ class BrowserCapture:
 class TieredResearchRun:
     """Full normalized tiered prospect research artifact model."""
 
-    directive: SearchDirective | Mapping[str, Any]
-    companies: tuple[CompanyProspect | Mapping[str, Any], ...] = ()
-    contacts: tuple[ContactCandidate | Mapping[str, Any], ...] = ()
-    personalization_signals: tuple[PersonalizationSignal | Mapping[str, Any], ...] = ()
-    browser_captures: tuple[BrowserCapture | Mapping[str, Any], ...] = ()
+    directive: SearchDirective
+    companies: tuple[CompanyProspect, ...] = ()
+    contacts: tuple[ContactCandidate, ...] = ()
+    personalization_signals: tuple[PersonalizationSignal, ...] = ()
+    browser_captures: tuple[BrowserCapture, ...] = ()
     warnings: tuple[str, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "directive", _coerce_directive(self.directive))
-        object.__setattr__(self, "companies", tuple(_coerce_company(v) for v in self.companies))
-        object.__setattr__(self, "contacts", tuple(_coerce_contact(v) for v in self.contacts))
+        raw_directive = cast(SearchDirective | Mapping[str, Any], self.directive)
+        raw_companies = cast(tuple[CompanyProspect | Mapping[str, Any], ...], self.companies)
+        raw_contacts = cast(tuple[ContactCandidate | Mapping[str, Any], ...], self.contacts)
+        object.__setattr__(self, "directive", _coerce_directive(raw_directive))
+        object.__setattr__(self, "companies", tuple(_coerce_company(v) for v in raw_companies))
+        object.__setattr__(self, "contacts", tuple(_coerce_contact(v) for v in raw_contacts))
         object.__setattr__(
             self,
             "personalization_signals",
-            tuple(_coerce_personalization(v) for v in self.personalization_signals),
+            tuple(
+                _coerce_personalization(v)
+                for v in cast(
+                    tuple[PersonalizationSignal | Mapping[str, Any], ...],
+                    self.personalization_signals,
+                )
+            ),
         )
         object.__setattr__(
-            self, "browser_captures", tuple(_coerce_capture(v) for v in self.browser_captures)
+            self,
+            "browser_captures",
+            tuple(
+                _coerce_capture(v)
+                for v in cast(tuple[BrowserCapture | Mapping[str, Any], ...], self.browser_captures)
+            ),
         )
         object.__setattr__(self, "warnings", tuple(self.warnings))
         object.__setattr__(self, "metadata", dict(self.metadata))
@@ -288,7 +302,11 @@ def write_tiered_artifacts(
     markdown_path = output_path / "research_report.md"
 
     json_path.write_text(
-        json.dumps(build_tiered_artifact_payload(normalized, metadata=metadata), indent=2, sort_keys=True)
+        json.dumps(
+            build_tiered_artifact_payload(normalized, metadata=metadata),
+            indent=2,
+            sort_keys=True,
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -514,7 +532,9 @@ def _personalization_row(signal: PersonalizationSignal) -> dict[str, Any]:
     }
 
 
-def _write_csv(path: Path, fieldnames: Sequence[str], rows: Sequence[Mapping[str, Any]] | Any) -> None:
+def _write_csv(
+    path: Path, fieldnames: Sequence[str], rows: Sequence[Mapping[str, Any]] | Any
+) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -523,7 +543,9 @@ def _write_csv(path: Path, fieldnames: Sequence[str], rows: Sequence[Mapping[str
 
 
 def _render_markdown_report(run: TieredResearchRun) -> str:
-    contacts_by_company: dict[str, list[ContactCandidate]] = {c.company_id: [] for c in run.companies}
+    contacts_by_company: dict[str, list[ContactCandidate]] = {
+        c.company_id: [] for c in run.companies
+    }
     for contact in run.contacts:
         contacts_by_company.setdefault(contact.company_id, []).append(contact)
 
@@ -605,7 +627,9 @@ def _render_markdown_report(run: TieredResearchRun) -> str:
                         )
 
         company_level_signals = [
-            signal for signal in signals_by_company.get(company.company_id, []) if not signal.contact_id
+            signal
+            for signal in signals_by_company.get(company.company_id, [])
+            if not signal.contact_id
         ]
         if company_level_signals:
             lines.extend(["", "#### Company Personalization Signals"])

@@ -6,12 +6,12 @@ import json
 import pytest
 
 from deep_research_agent.tiered_artifacts import (
+    TIERED_ARTIFACT_SCHEMA_VERSION,
     BrowserCapture,
     CompanyProspect,
     ContactCandidate,
     PersonalizationSignal,
     SearchDirective,
-    TIERED_ARTIFACT_SCHEMA_VERSION,
     TieredResearchRun,
     build_tiered_artifact_payload,
     write_tiered_artifacts,
