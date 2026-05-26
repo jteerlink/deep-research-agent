@@ -23,6 +23,7 @@ from .graph import (
     run_research,
     run_research_workflow,
 )
+from .models import ModelPreflightError, build_model_client
 
 
 def _checkpoint_payload(checkpoint: object) -> str:
@@ -81,6 +82,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="List async_multi_search.py provider order and required environment keys.",
     )
 
+    model_status_parser = subparsers.add_parser(
+        "model-status", help="Show redacted live model availability diagnostics."
+    )
+    model_status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit model status as JSON instead of a short summary.",
+    )
+    model_status_parser.add_argument(
+        "--live-smoke",
+        action="store_true",
+        help="Run a live structured-output smoke call against the first available provider.",
+    )
+
     run_parser = subparsers.add_parser("run", help="Run the local G003 research workflow.")
     run_parser.add_argument("query", help="Research query to run through the nested workflow.")
     run_parser.add_argument("--thread-id", help="Durable thread id to use for checkpointing.")
@@ -112,6 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-llm-judgment",
         action="store_true",
         help="Disable structured LLM prospect judgment and use deterministic triage only.",
+    )
+    run_parser.add_argument(
+        "--require-live-model",
+        action="store_true",
+        help="Fail before search if no hosted model provider is available for judgment.",
     )
     run_parser.add_argument(
         "--approve",
@@ -149,6 +169,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Compatibility alias for --approve.",
     )
+    resume_parser.add_argument(
+        "--require-live-model",
+        action="store_true",
+        help="Fail before resuming if no hosted model provider is available for judgment.",
+    )
     resume_parser.add_argument("--json", action="store_true", help="Emit resume result as JSON.")
 
     inspect_parser = subparsers.add_parser(
@@ -169,6 +194,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _print_json(payload: Any) -> None:
     print(json.dumps(_jsonable(payload), indent=2, sort_keys=True))
+
+
+def _print_model_status(payload: dict[str, Any]) -> None:
+    print(f"primary_provider={payload.get('primary_provider', '')}")
+    print(f"live_model_available={str(payload.get('live_model_available', False)).lower()}")
+    selected = payload.get("selected_provider") or "none"
+    print(f"selected_provider={selected}")
+    for provider in payload.get("providers", []):
+        status = "available" if provider.get("available") else provider.get("unavailable_reason")
+        print(
+            f"{provider.get('provider')}: {status}; "
+            f"model_set={str(bool(provider.get('model'))).lower()}; "
+            f"base_url_set={str(bool(provider.get('base_url'))).lower()}; "
+            f"api_key_configured={str(bool(provider.get('api_key_configured'))).lower()}"
+        )
+    live_smoke = payload.get("live_smoke")
+    if live_smoke:
+        structured = live_smoke.get("structured") or {}
+        print(f"live_smoke_status={structured.get('status') or structured.get('ok')}")
 
 
 def _mock_search_from_specs(specs: Sequence[str]):
@@ -209,92 +253,147 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"{provider.name}: {provider.env_key or 'no key required'}")
         return 0
 
-    if args.command == "run":
+    if args.command == "model-status":
+        client = build_model_client()
+        payload = client.preflight().to_dict()
+        if args.live_smoke:
+            payload["live_smoke"] = asyncio.run(client.live_smoke()).to_dict()
         if args.json:
-            if args.artifact_dir:
+            _print_json(payload)
+        else:
+            _print_model_status(payload)
+        return 0
+
+    if args.command == "run":
+        try:
+            if args.json:
+                if args.artifact_dir:
+                    state = asyncio.run(
+                        run_research(
+                            args.query,
+                            thread_id=args.thread_id,
+                            checkpoint_dir=args.checkpoint_dir,
+                            require_review=not args.approve,
+                            max_iterations=args.max_iterations,
+                            max_results=args.max_results,
+                            target_prospect_count=args.target_prospect_count,
+                            enable_llm_judgment=not args.no_llm_judgment,
+                            require_live_model=args.require_live_model,
+                            review_approved=args.approve,
+                            artifact_dir=args.artifact_dir,
+                        )
+                    )
+                    _print_json(state)
+                    return 0
+                if args.require_live_model:
+                    state = asyncio.run(
+                        run_research(
+                            args.query,
+                            thread_id=args.thread_id,
+                            checkpoint_dir=args.checkpoint_dir,
+                            require_review=not args.approve,
+                            max_iterations=args.max_iterations,
+                            max_results=args.max_results,
+                            target_prospect_count=args.target_prospect_count,
+                            enable_llm_judgment=not args.no_llm_judgment,
+                            require_live_model=True,
+                            review_approved=args.approve,
+                        )
+                    )
+                    _print_json(state)
+                    return 0
+                result = run_query(
+                    args.query,
+                    thread_id=args.thread_id,
+                    checkpoint_dir=args.checkpoint_dir,
+                    max_iterations=args.max_iterations,
+                    approve=args.approve,
+                )
+                _print_json(result)
+                return 0
+
+            if args.require_review or args.mock_result:
                 state = asyncio.run(
                     run_research(
                         args.query,
                         thread_id=args.thread_id,
                         checkpoint_dir=args.checkpoint_dir,
-                        require_review=not args.approve,
+                        search=_mock_search_from_specs(args.mock_result)
+                        if args.mock_result
+                        else None,
+                        require_review=args.require_review,
                         max_iterations=args.max_iterations,
                         max_results=args.max_results,
                         target_prospect_count=args.target_prospect_count,
                         enable_llm_judgment=not args.no_llm_judgment,
+                        require_live_model=args.require_live_model,
                         review_approved=args.approve,
                         artifact_dir=args.artifact_dir,
                     )
                 )
                 _print_json(state)
                 return 0
-            result = run_query(
+
+            checkpoint = run_research_workflow(
                 args.query,
                 thread_id=args.thread_id,
                 checkpoint_dir=args.checkpoint_dir,
-                max_iterations=args.max_iterations,
-                approve=args.approve,
+                max_results=args.max_results,
+                require_live_model=args.require_live_model,
+                artifact_dir=args.artifact_dir,
             )
-            _print_json(result)
+            _print_json(checkpoint.to_dict())
             return 0
-
-        if args.require_review or args.mock_result:
-            state = asyncio.run(
-                run_research(
-                    args.query,
-                    thread_id=args.thread_id,
-                    checkpoint_dir=args.checkpoint_dir,
-                    search=_mock_search_from_specs(args.mock_result) if args.mock_result else None,
-                    require_review=args.require_review,
-                    max_iterations=args.max_iterations,
-                    max_results=args.max_results,
-                    target_prospect_count=args.target_prospect_count,
-                    enable_llm_judgment=not args.no_llm_judgment,
-                    review_approved=args.approve,
-                    artifact_dir=args.artifact_dir,
-                )
-            )
-            _print_json(state)
-            return 0
-
-        checkpoint = run_research_workflow(
-            args.query,
-            thread_id=args.thread_id,
-            checkpoint_dir=args.checkpoint_dir,
-            max_results=args.max_results,
-            artifact_dir=args.artifact_dir,
-        )
-        _print_json(checkpoint.to_dict())
-        return 0
+        except ModelPreflightError as exc:
+            parser.error(str(exc))
 
     if args.command == "resume":
         approve = bool(args.approve or args.approve_review)
-        if args.json:
-            result = resume_thread(
-                args.thread_id,
-                checkpoint_dir=args.checkpoint_dir,
-                approve=approve,
-            )
-            _print_json(result)
-            return 0
-
-        if approve:
-            state = asyncio.run(
-                resume_research(
+        try:
+            if args.json:
+                if args.require_live_model:
+                    state = asyncio.run(
+                        resume_research(
+                            args.thread_id,
+                            checkpoint_dir=args.checkpoint_dir,
+                            approve_review=approve,
+                            require_live_model=True,
+                            artifact_dir=args.artifact_dir,
+                        )
+                    )
+                    _print_json(state)
+                    return 0
+                result = resume_thread(
                     args.thread_id,
                     checkpoint_dir=args.checkpoint_dir,
-                    approve_review=True,
-                    artifact_dir=args.artifact_dir,
+                    approve=approve,
                 )
-            )
-            _print_json(state)
-            return 0
+                _print_json(result)
+                return 0
 
-        checkpoint = resume_research_workflow(
-            args.thread_id, checkpoint_dir=args.checkpoint_dir, artifact_dir=args.artifact_dir
-        )
-        _print_json(checkpoint.to_dict())
-        return 0
+            if approve:
+                state = asyncio.run(
+                    resume_research(
+                        args.thread_id,
+                        checkpoint_dir=args.checkpoint_dir,
+                        approve_review=True,
+                        require_live_model=args.require_live_model,
+                        artifact_dir=args.artifact_dir,
+                    )
+                )
+                _print_json(state)
+                return 0
+
+            checkpoint = resume_research_workflow(
+                args.thread_id,
+                checkpoint_dir=args.checkpoint_dir,
+                require_live_model=args.require_live_model,
+                artifact_dir=args.artifact_dir,
+            )
+            _print_json(checkpoint.to_dict())
+            return 0
+        except ModelPreflightError as exc:
+            parser.error(str(exc))
 
     if args.command == "inspect":
         thread_id = args.thread_id_option or args.thread_id

@@ -7,6 +7,7 @@ from pathlib import Path
 from deep_research_agent.ui import (
     build_prospect_directive,
     env_file_overlay,
+    model_preflight_from_env_file,
     preview_geography_scope,
     provider_env_from_env_file,
     provider_env_overlay,
@@ -61,6 +62,18 @@ def test_env_file_overlay_loads_non_exported_runtime_values(tmp_path, monkeypatc
         "SSL_CERT_FILE": "/tmp/corp-ca.pem",
         "REQUESTS_CA_BUNDLE": "/tmp/requests-ca.pem",
     }
+
+
+def test_model_preflight_from_env_file_uses_runtime_overlay(tmp_path, monkeypatch) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("OLLAMA_API_KEY=from-dotenv\n", encoding="utf-8")
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+
+    payload = model_preflight_from_env_file(dotenv)
+
+    assert payload["live_model_available"] is True
+    assert payload["selected_provider"] == "ollama_native"
+    assert "from-dotenv" not in str(payload)
 
 
 def test_build_prospect_directive_includes_business_target_context() -> None:

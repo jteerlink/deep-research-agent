@@ -104,6 +104,69 @@ class ModelResponse:
         }
 
 
+@dataclass(frozen=True)
+class ModelProviderStatus:
+    """Redacted availability details for one configured model provider."""
+
+    provider: ModelProvider
+    model: str
+    base_url: str
+    api_key_configured: bool
+    available: bool
+    unavailable_reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable status without exposing API keys."""
+
+        return {
+            "provider": self.provider.value,
+            "model": self.model,
+            "base_url": self.base_url,
+            "api_key_configured": self.api_key_configured,
+            "available": self.available,
+            "unavailable_reason": self.unavailable_reason,
+        }
+
+
+@dataclass(frozen=True)
+class ModelPreflight:
+    """Shared model availability summary used by CLI, UI, and run metadata."""
+
+    primary_provider: ModelProvider
+    provider_order: tuple[ModelProvider, ...]
+    live_model_available: bool
+    selected_provider: ModelProvider | None
+    providers: tuple[ModelProviderStatus, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable redacted preflight payload."""
+
+        return {
+            "primary_provider": self.primary_provider.value,
+            "provider_order": [provider.value for provider in self.provider_order],
+            "live_model_available": self.live_model_available,
+            "selected_provider": self.selected_provider.value if self.selected_provider else "",
+            "providers": [provider.to_dict() for provider in self.providers],
+        }
+
+
+class ModelPreflightError(RuntimeError):
+    """Raised when live model judgment is required but no provider is available."""
+
+    def __init__(self, preflight: ModelPreflight) -> None:
+        self.preflight = preflight
+        unavailable = [
+            f"{provider.provider.value}:{provider.unavailable_reason or 'unavailable'}"
+            for provider in preflight.providers
+            if not provider.available
+        ]
+        detail = "; ".join(unavailable) or "no providers configured"
+        super().__init__(
+            "Live model required but no configured provider is available. "
+            f"{detail}. Set OLLAMA_API_KEY for Ollama Cloud or configure a hosted fallback."
+        )
+
+
 class ModelClient(Protocol):
     """Minimal interface expected by graph nodes."""
 
@@ -161,21 +224,37 @@ class ConfiguredModelClient:
     def provider_available(self, provider: ModelProvider) -> bool:
         """Return whether the placeholder can select provider metadata locally."""
 
+        return self.provider_status(provider).available
+
+    def provider_status(self, provider: ModelProvider) -> ModelProviderStatus:
+        """Return redacted provider availability details and a reason code."""
+
         model = self.provider_model(provider)
         base_url = self.provider_base_url(provider)
+        api_key_configured = bool(self.provider_api_key(provider))
+        unavailable_reason = ""
         if not model:
-            return False
-        if provider is ModelProvider.OLLAMA_NATIVE:
+            unavailable_reason = "missing_model"
+        elif not base_url:
+            unavailable_reason = "missing_base_url"
+        elif provider in {ModelProvider.OLLAMA_NATIVE, ModelProvider.OLLAMA_OPENAI}:
             host = urlparse(base_url).hostname or ""
-            return bool(self.provider_api_key(provider)) and not _is_local_host(host)
-        if provider is ModelProvider.OLLAMA_OPENAI:
-            host = urlparse(base_url).hostname or ""
-            return bool(base_url and self.provider_api_key(provider)) and not _is_local_host(host)
-        if provider is ModelProvider.OPENAI:
-            return bool(base_url and self.config.openai.api_key)
-        if provider is ModelProvider.CODEX:
-            return bool(base_url and self.config.codex.api_key)
-        return bool(base_url)
+            if _is_local_host(host):
+                unavailable_reason = "local_host_not_supported"
+            elif not api_key_configured:
+                unavailable_reason = "missing_api_key"
+        elif provider in {ModelProvider.OPENAI, ModelProvider.CODEX}:
+            if not api_key_configured:
+                unavailable_reason = "missing_api_key"
+
+        return ModelProviderStatus(
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            api_key_configured=api_key_configured,
+            available=unavailable_reason == "",
+            unavailable_reason=unavailable_reason,
+        )
 
     def provider_order(self) -> tuple[ModelProvider, ...]:
         """Return primary provider plus deterministic hosted fallbacks."""
@@ -186,6 +265,44 @@ class ConfiguredModelClient:
             if provider not in deduped:
                 deduped.append(provider)
         return tuple(deduped)
+
+    def preflight(self) -> ModelPreflight:
+        """Return the configured provider order and first available live provider."""
+
+        order = self.provider_order()
+        providers = tuple(self.provider_status(provider) for provider in order)
+        selected = next((provider.provider for provider in providers if provider.available), None)
+        return ModelPreflight(
+            primary_provider=self.primary_provider,
+            provider_order=order,
+            live_model_available=selected is not None,
+            selected_provider=selected,
+            providers=providers,
+        )
+
+    def ensure_live_model_available(self) -> ModelPreflight:
+        """Return preflight status or raise when no live provider can run."""
+
+        preflight = self.preflight()
+        if not preflight.live_model_available:
+            raise ModelPreflightError(preflight)
+        return preflight
+
+    async def live_smoke(self) -> ModelResponse:
+        """Run an optional structured-output smoke test against the selected provider."""
+
+        return await self._invoke_structured(
+            ModelRequest(
+                node="model_status",
+                prompt='Return only this JSON object: {"ok": true}',
+                response_schema={
+                    "type": "object",
+                    "required": ["ok"],
+                    "properties": {"ok": {"type": "boolean"}},
+                },
+                metadata={"purpose": "live_smoke"},
+            )
+        )
 
     async def invoke(self, request: ModelRequest) -> ModelResponse:
         """Invoke structured model requests while keeping metadata-only calls offline."""

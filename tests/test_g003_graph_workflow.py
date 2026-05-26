@@ -209,6 +209,7 @@ def test_run_research_passes_max_results_and_emits_progress_events(tmp_path) -> 
     assert state["status"] == "interrupted"
     assert [event["event"] for event in progress_events] == [
         "main_started",
+        "model_preflight",
         "supervisor_delegated",
         "search_started",
         "search_completed",

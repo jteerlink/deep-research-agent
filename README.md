@@ -97,3 +97,10 @@ directories, aggregators, social/job pages, listicles, reviews, and vendor-noise
 results. Plausible owned-domain candidates then go through structured LLM
 judgment when a configured provider is available, with deterministic fallback for
 offline runs.
+
+Use `deep-research-agent model-status` before long prospect runs to verify the
+redacted live-model configuration. `--live-smoke` performs an optional structured
+JSON call against the first available hosted provider. Add `--require-live-model`
+to `run` or `resume` when export-qualified prospects are required; without it,
+offline or unavailable model paths remain review-only and deterministic fallback
+will not satisfy export qualification.

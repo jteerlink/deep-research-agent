@@ -29,7 +29,15 @@ from .graph import (
     resume_thread,
     run_query,
 )
-from .models import FallbackEvent, ModelRequest, ModelResponse, build_model_client
+from .models import (
+    FallbackEvent,
+    ModelPreflight,
+    ModelPreflightError,
+    ModelProviderStatus,
+    ModelRequest,
+    ModelResponse,
+    build_model_client,
+)
 from .prospects import CitationValidationError, Prospect, ProspectCitation
 from .search import FirecrawlProvider, SearchResult, YdcProvider, web_search
 
@@ -40,6 +48,9 @@ __all__ = [
     "FallbackEvent",
     "GeoAliasSuggestion",
     "GeoScope",
+    "ModelPreflight",
+    "ModelPreflightError",
+    "ModelProviderStatus",
     "ModelRequest",
     "ModelResponse",
     "OllamaNativeConfig",

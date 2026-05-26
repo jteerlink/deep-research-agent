@@ -27,6 +27,7 @@ try:
         resume_research,
         run_research,
     )
+    from .models import build_model_client
 except ImportError:
     if __package__:
         raise
@@ -39,6 +40,7 @@ except ImportError:
         resume_research,
         run_research,
     )
+    from deep_research_agent.models import build_model_client
 
 PROVIDER_API_KEY_FIELDS: tuple[tuple[str, str], ...] = (
     ("Tavily", "TAVILY_API_KEY"),
@@ -117,6 +119,16 @@ def env_file_overlay(
     current = os.environ if environ is None else environ
     values = dotenv_values(path) if os.fspath(path).strip() else {}
     return {key: value for key, value in values.items() if value and key not in current}
+
+
+def model_preflight_from_env_file(
+    path: str | os.PathLike[str] = ".env",
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Return redacted model availability using the same env overlay as runs."""
+
+    with temporary_env(env_file_overlay(path, environ=environ)):
+        return build_model_client().preflight().to_dict()
 
 
 @contextmanager
@@ -239,6 +251,13 @@ def render_app() -> None:
         ]
         st.caption(f"Configured providers: {', '.join(configured) if configured else 'none'}")
         st.caption(f"Missing provider keys: {', '.join(missing) if missing else 'none'}")
+        model_preflight = model_preflight_from_env_file(env_file)
+        model_label = (
+            model_preflight.get("selected_provider")
+            if model_preflight.get("live_model_available")
+            else "none"
+        )
+        st.caption(f"Live model provider: {model_label}")
 
         run_clicked = st.button("Run", type="primary", width="stretch")
         resume_clicked = st.button("Resume", width="stretch")

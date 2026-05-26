@@ -25,7 +25,7 @@ from async_multi_search import SearchResult
 from .artifacts import write_research_artifacts
 from .config import ModelProvider, load_config
 from .geography import GeoScope, normalize_geography, suggest_geography_alias_update
-from .models import ModelClient, ModelRequest, build_model_client
+from .models import ModelClient, ModelPreflightError, ModelRequest, build_model_client
 from .prospect_judgment import (
     CandidateReview,
     ProspectCandidate,
@@ -84,6 +84,8 @@ class ResearchState(TypedDict, total=False):
     events: list[dict[str, Any]]
     fallback_events: list[dict[str, Any]]
     model_metadata: dict[str, Any]
+    model_preflight: dict[str, Any]
+    model_judgment_fallback_events: list[dict[str, Any]]
     review_interrupt: dict[str, Any]
     prospect_targets: list[dict[str, Any]]
     prospect_reviews: list[dict[str, Any]]
@@ -106,6 +108,7 @@ class ProspectExtractionResult:
     rejections: list[dict[str, Any]]
     extra_evidence: list[dict[str, Any]]
     warnings: list[str]
+    model_fallback_events: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -244,6 +247,7 @@ class LocalResearchWorkflow:
         max_iterations: int = DEFAULT_MAX_RESEARCH_ITERATIONS,
         max_results: int = 5,
         target_prospect_count: int = DEFAULT_TARGET_PROSPECT_COUNT,
+        require_live_model: bool = False,
         progress_callback: ProgressCallback | None = None,
     ) -> ResearchState:
         return await run_research(
@@ -255,6 +259,7 @@ class LocalResearchWorkflow:
             max_iterations=max_iterations,
             max_results=max_results,
             target_prospect_count=target_prospect_count,
+            require_live_model=require_live_model,
             progress_callback=progress_callback,
         )
 
@@ -265,9 +270,14 @@ class LocalResearchWorkflow:
         approve_review: bool = False,
         search: SearchFn | None = None,
         max_results: int | None = None,
+        require_live_model: bool = False,
         progress_callback: ProgressCallback | None = None,
     ) -> ResearchState:
         state = self.checkpoint_store.load(thread_id)
+        if require_live_model:
+            _ensure_live_model_if_required(
+                build_model_client(), require_live_model=True, enable_llm_judgment=True
+            )
         if not approve_review and state.get("status") == "interrupted":
             return state
         query = str(state.get("query", ""))
@@ -281,6 +291,7 @@ class LocalResearchWorkflow:
             max_results=_coerce_int(
                 max_results if max_results is not None else state.get("max_results"), 5
             ),
+            require_live_model=require_live_model,
             progress_callback=progress_callback,
             review_approved=True,
             existing_state=state,
@@ -301,6 +312,32 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, ModelProvider):
         return value.value
     return value
+
+
+def _model_preflight_payload(model_client: ModelClient) -> dict[str, Any]:
+    preflight = getattr(model_client, "preflight", None)
+    if callable(preflight):
+        return cast(dict[str, Any], _jsonable(preflight().to_dict()))
+    return {
+        "live_model_available": True,
+        "injected_model_client": type(model_client).__name__,
+        "providers": [],
+    }
+
+
+def _ensure_live_model_if_required(
+    model_client: ModelClient, *, require_live_model: bool, enable_llm_judgment: bool
+) -> dict[str, Any]:
+    payload = _model_preflight_payload(model_client)
+    if not require_live_model or not enable_llm_judgment:
+        return payload
+    ensure = getattr(model_client, "ensure_live_model_available", None)
+    if callable(ensure):
+        try:
+            return cast(dict[str, Any], _jsonable(ensure().to_dict()))
+        except ModelPreflightError:
+            raise
+    return payload
 
 
 def _coerce_int(value: Any, default: int) -> int:
@@ -658,6 +695,7 @@ async def _prospects_from_evidence(
     rejections: list[dict[str, Any]] = list(duplicate_rejections)
     extra_evidence: list[dict[str, Any]] = []
     warnings: list[str] = []
+    model_fallback_events: list[dict[str, Any]] = []
     page_text_by_domain = _page_text_by_domain(evidence)
     normalized_geography_scope = dict(geography_scope or geography_scope_for_query(query).to_dict())
 
@@ -717,6 +755,9 @@ async def _prospects_from_evidence(
                         },
                     )
                 )
+                model_fallback_events.extend(
+                    event.to_dict() for event in model_response.fallback_events
+                )
                 structured = model_response.structured or {}
                 status = str(structured.get("status") or "")
                 if status in {"metadata_only", "model_unavailable", "no_available_model"}:
@@ -759,6 +800,7 @@ async def _prospects_from_evidence(
         rejections=rejections,
         extra_evidence=extra_evidence,
         warnings=list(dict.fromkeys(warnings)),
+        model_fallback_events=model_fallback_events,
     )
 
 
@@ -1125,6 +1167,10 @@ def _write_artifacts_if_requested(
             "prospect_targets": list(state.get("prospect_targets", [])),
             "prospect_reviews": list(state.get("prospect_reviews", [])),
             "prospect_rejections": list(state.get("prospect_rejections", [])),
+            "model_preflight": dict(state.get("model_preflight", {})),
+            "model_judgment_fallback_events": list(
+                state.get("model_judgment_fallback_events", [])
+            ),
             "warnings": list(state.get("warnings", [])),
             "review_only_count": _review_only_count(state),
             "export_qualified_count": len(list(state.get("prospect_targets", []))),
@@ -1150,6 +1196,7 @@ async def run_research(
     max_results: int = 5,
     target_prospect_count: int = DEFAULT_TARGET_PROSPECT_COUNT,
     enable_llm_judgment: bool = True,
+    require_live_model: bool = False,
     progress_callback: ProgressCallback | None = None,
     review_approved: bool = False,
     existing_state: Mapping[str, Any] | None = None,
@@ -1159,6 +1206,11 @@ async def run_research(
 
     store = LocalCheckpointStore(checkpoint_dir)
     selected_model_client = model_client or build_model_client()
+    model_preflight = _ensure_live_model_if_required(
+        selected_model_client,
+        require_live_model=require_live_model,
+        enable_llm_judgment=enable_llm_judgment,
+    )
     geography_scope = geography_scope_for_query(query).to_dict()
     geography_alias_suggestion = suggest_geography_alias_update(
         str(geography_scope.get("raw", ""))
@@ -1173,6 +1225,8 @@ async def run_research(
         state = dict(existing_state)
         state.setdefault("events", [])
         state.setdefault("geography_scope", geography_scope)
+        state["model_preflight"] = model_preflight
+        state.setdefault("model_judgment_fallback_events", [])
         if geography_alias_suggestion is not None:
             state.setdefault(
                 "geography_alias_suggestion", geography_alias_suggestion.to_dict()
@@ -1205,6 +1259,8 @@ async def run_research(
         "evidence": [],
         "findings": [],
         "fallback_events": [],
+        "model_preflight": model_preflight,
+        "model_judgment_fallback_events": [],
         "prospect_targets": [],
         "prospect_reviews": [],
         "prospect_rejections": [],
@@ -1217,6 +1273,12 @@ async def run_research(
         await _notify_progress(progress_callback, _append_event(state, node, event, **metadata))
 
     await record("main", "main_started")
+    await record(
+        "model",
+        "model_preflight",
+        live_model_available=bool(model_preflight.get("live_model_available")),
+        selected_provider=model_preflight.get("selected_provider", ""),
+    )
     for warning in state["warnings"]:
         await record("warning", "warning_recorded", message=warning)
 
@@ -1257,6 +1319,11 @@ async def run_research(
             state["evidence"] = _dedupe_evidence(
                 [*list(state.get("evidence", [])), *extraction.extra_evidence]
             )
+        if extraction.model_fallback_events:
+            state["model_judgment_fallback_events"] = [
+                *list(state.get("model_judgment_fallback_events", [])),
+                *extraction.model_fallback_events,
+            ]
         for warning in extraction.warnings:
             if warning not in state["warnings"]:
                 state["warnings"].append(warning)
@@ -1347,6 +1414,7 @@ async def resume_research(
     approve_review: bool = True,
     search: SearchFn | None = None,
     max_results: int | None = None,
+    require_live_model: bool = False,
     progress_callback: ProgressCallback | None = None,
     artifact_dir: str | Path | None = None,
 ) -> ResearchState:
@@ -1354,6 +1422,10 @@ async def resume_research(
 
     store = LocalCheckpointStore(checkpoint_dir)
     state = store.load(thread_id)
+    if require_live_model:
+        _ensure_live_model_if_required(
+            build_model_client(), require_live_model=True, enable_llm_judgment=True
+        )
     if state.get("status") == "interrupted" and not approve_review:
         return state
     return await run_research(
@@ -1366,6 +1438,7 @@ async def resume_research(
         max_results=_coerce_int(
             max_results if max_results is not None else state.get("max_results"), 5
         ),
+        require_live_model=require_live_model,
         progress_callback=progress_callback,
         review_approved=approve_review,
         existing_state=state,
@@ -1464,6 +1537,7 @@ def run_research_workflow(
     thread_id: str | None = None,
     checkpoint_dir: str | Path | None = None,
     max_results: int = 5,
+    require_live_model: bool = False,
     artifact_dir: str | Path | None = None,
 ) -> ResearchCheckpoint:
     state = asyncio.run(
@@ -1473,6 +1547,7 @@ def run_research_workflow(
             checkpoint_dir=checkpoint_dir,
             require_review=True,
             max_results=max_results,
+            require_live_model=require_live_model,
             artifact_dir=artifact_dir,
         )
     )
@@ -1483,6 +1558,7 @@ def resume_research_workflow(
     thread_id: str,
     *,
     checkpoint_dir: str | Path | None = None,
+    require_live_model: bool = False,
     artifact_dir: str | Path | None = None,
 ) -> ResearchCheckpoint:
     state = asyncio.run(
@@ -1490,6 +1566,7 @@ def resume_research_workflow(
             thread_id,
             checkpoint_dir=checkpoint_dir,
             approve_review=True,
+            require_live_model=require_live_model,
             artifact_dir=artifact_dir,
         )
     )

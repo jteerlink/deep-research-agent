@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from async_multi_search import SearchResult
 from deep_research_agent.config import (
     AppConfig,
@@ -26,7 +28,12 @@ from deep_research_agent.graph import (
     route_after_supervisor,
     run_research,
 )
-from deep_research_agent.models import ModelRequest, build_model_client
+from deep_research_agent.models import (
+    ConfiguredModelClient,
+    ModelPreflightError,
+    ModelRequest,
+    build_model_client,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -149,6 +156,196 @@ def test_model_client_does_not_treat_local_ollama_as_available() -> None:
 
     assert client.provider_available(ModelProvider.OLLAMA_NATIVE) is False
     assert client.provider_available(ModelProvider.OLLAMA_OPENAI) is False
+
+
+def test_model_preflight_reports_missing_ollama_cloud_key_without_secret_values() -> None:
+    config = AppConfig(
+        primary_provider=ModelProvider.OLLAMA_NATIVE,
+        ollama_native=OllamaNativeConfig(api_key=""),
+        ollama_openai=OllamaOpenAIConfig(),
+        openai=OpenAIConfig(api_key="", model="openai-test"),
+        codex=CodexConfig(api_key="", model="codex-test"),
+        search=SearchConfig(),
+    )
+
+    payload = build_model_client(config).preflight().to_dict()
+
+    assert payload["live_model_available"] is False
+    assert payload["selected_provider"] == ""
+    assert payload["providers"][0]["provider"] == "ollama_native"
+    assert payload["providers"][0]["unavailable_reason"] == "missing_api_key"
+    assert "secret" not in json.dumps(payload).lower()
+
+
+def test_model_preflight_selects_ollama_cloud_when_api_key_is_present() -> None:
+    config = AppConfig(
+        primary_provider=ModelProvider.OLLAMA_NATIVE,
+        ollama_native=OllamaNativeConfig(api_key="ollama-secret"),
+        ollama_openai=OllamaOpenAIConfig(),
+        openai=OpenAIConfig(api_key="", model="openai-test"),
+        codex=CodexConfig(api_key="", model="codex-test"),
+        search=SearchConfig(),
+    )
+
+    payload = build_model_client(config).preflight().to_dict()
+
+    assert payload["live_model_available"] is True
+    assert payload["selected_provider"] == "ollama_native"
+    assert payload["providers"][0]["api_key_configured"] is True
+    assert "ollama-secret" not in json.dumps(payload)
+
+
+def test_model_preflight_rejects_local_ollama_even_with_key() -> None:
+    config = AppConfig(
+        primary_provider=ModelProvider.OLLAMA_NATIVE,
+        ollama_native=OllamaNativeConfig(
+            base_url="http://localhost:11434/api",
+            model="deepseek-v4-pro:cloud",
+            api_key="local-key",
+        ),
+        ollama_openai=OllamaOpenAIConfig(),
+        openai=OpenAIConfig(api_key="", model="openai-test"),
+        codex=CodexConfig(api_key="", model="codex-test"),
+        search=SearchConfig(),
+    )
+
+    payload = build_model_client(config).preflight().to_dict()
+
+    assert payload["live_model_available"] is False
+    assert payload["providers"][0]["unavailable_reason"] == "local_host_not_supported"
+
+
+def test_require_live_model_fails_before_search_when_no_provider_available() -> None:
+    search_called = False
+
+    async def search(_query: str, _max_results: int):
+        nonlocal search_called
+        search_called = True
+        return []
+
+    config = AppConfig(
+        primary_provider=ModelProvider.OLLAMA_NATIVE,
+        ollama_native=OllamaNativeConfig(api_key=""),
+        ollama_openai=OllamaOpenAIConfig(),
+        openai=OpenAIConfig(api_key="", model="openai-test"),
+        codex=CodexConfig(api_key="", model="codex-test"),
+        search=SearchConfig(),
+    )
+
+    with pytest.raises(ModelPreflightError, match="Live model required"):
+        asyncio.run(
+            run_research(
+                "industry: HVAC\ngeography: North Texas",
+                search=search,
+                model_client=build_model_client(config),
+                require_live_model=True,
+                max_iterations=1,
+            )
+        )
+
+    assert search_called is False
+
+
+def test_resume_require_live_model_checks_preflight_before_interrupted_return(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+
+    async def search(_query: str, _max_results: int):
+        return [
+            SearchResult(
+                "Actual HVAC",
+                "https://actualhvac.com/",
+                "We provide AC repair in Fort Worth.",
+                provider="tavily",
+            )
+        ]
+
+    asyncio.run(
+        run_research(
+            "industry: HVAC\ngeography: North Texas",
+            thread_id="interrupted-thread",
+            checkpoint_dir=tmp_path,
+            search=search,
+            require_review=True,
+            enable_llm_judgment=False,
+            max_iterations=1,
+        )
+    )
+
+    with pytest.raises(ModelPreflightError, match="Live model required"):
+        asyncio.run(
+            resume_research(
+                "interrupted-thread",
+                checkpoint_dir=tmp_path,
+                approve_review=False,
+                require_live_model=True,
+            )
+        )
+
+
+def test_configured_ollama_live_judgment_can_export_qualified_prospect(monkeypatch) -> None:
+    async def transport(
+        _self: ConfiguredModelClient,
+        provider: ModelProvider,
+        model: str,
+        request: ModelRequest,
+    ) -> str:
+        assert provider is ModelProvider.OLLAMA_NATIVE
+        assert model == "deepseek-v4-pro:cloud"
+        payload = json.loads(request.prompt)
+        candidate = payload["candidate"]
+        return json.dumps(
+            {
+                "accepted": True,
+                "organization": "Actual HVAC",
+                "canonical_website": candidate["canonical_website"],
+                "fit_score": 0.91,
+                "confidence": 0.86,
+                "reject_reason": "",
+                "fit_rationale": "Owned HVAC business in the target market.",
+                "evidence_summary": candidate["snippet"],
+                "personalized_angles": ["HVAC service follow-up"],
+                "decision_maker_leads": ["Owner"],
+                "guardrail_flags": [],
+            }
+        )
+
+    async def search(_query: str, _max_results: int):
+        return [
+            SearchResult(
+                "Actual HVAC",
+                "https://actualhvac.com/",
+                "We provide AC repair in Fort Worth.",
+                provider="tavily",
+            )
+        ]
+
+    monkeypatch.setattr(ConfiguredModelClient, "_transport", transport)
+    config = AppConfig(
+        primary_provider=ModelProvider.OLLAMA_NATIVE,
+        ollama_native=OllamaNativeConfig(api_key="ollama-key"),
+        ollama_openai=OllamaOpenAIConfig(),
+        openai=OpenAIConfig(api_key="", model="openai-test"),
+        codex=CodexConfig(api_key="", model="codex-test"),
+        search=SearchConfig(),
+    )
+
+    state = asyncio.run(
+        run_research(
+            "industry: HVAC\ngeography: North Texas",
+            search=search,
+            model_client=build_model_client(config),
+            require_live_model=True,
+            max_iterations=1,
+            target_prospect_count=1,
+        )
+    )
+
+    assert state["model_preflight"]["live_model_available"] is True
+    assert state["prospect_targets"][0]["organization"] == "Actual HVAC"
+    assert state["prospect_targets"][0]["metadata"]["export_qualified"] is True
 
 
 def test_thread_id_resume_approves_review_interrupt(tmp_path) -> None:
