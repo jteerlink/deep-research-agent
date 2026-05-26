@@ -55,9 +55,11 @@ deep-research-agent ui
 ```
 
 The UI is a local operator surface over the same checkpointed workflow. It
-reads provider API keys from `.env` or shell environment, exposes search
-max-results/timeout controls, and previews progress events, evidence, prospects,
-artifact paths, markdown, and raw JSON without asking for secrets in the browser.
+reads provider API keys from `.env` or shell environment, captures target
+industry/niche, geography, research criteria, and target prospect count, exposes
+search max-results/timeout controls, and previews progress events, evidence,
+prospects, artifact paths, markdown, and raw JSON without asking for secrets in
+the browser.
 
 
 ## G003 local workflow checkpoints

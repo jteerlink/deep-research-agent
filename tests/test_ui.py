@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from deep_research_agent.ui import (
+    build_prospect_directive,
     env_file_overlay,
     provider_env_from_env_file,
     provider_env_overlay,
@@ -59,6 +60,18 @@ def test_env_file_overlay_loads_non_exported_runtime_values(tmp_path, monkeypatc
         "SSL_CERT_FILE": "/tmp/corp-ca.pem",
         "REQUESTS_CA_BUNDLE": "/tmp/requests-ca.pem",
     }
+
+
+def test_build_prospect_directive_includes_business_target_context() -> None:
+    assert build_prospect_directive(
+        "dental practices",
+        "Dallas-Fort Worth",
+        "patient reactivation opportunity",
+    ) == (
+        "industry: dental practices\n"
+        "geography: Dallas-Fort Worth\n"
+        "criteria: patient reactivation opportunity"
+    )
 
 
 def test_temporary_env_restores_secret_values(monkeypatch) -> None:

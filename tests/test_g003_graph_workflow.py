@@ -11,6 +11,7 @@ from deep_research_agent.graph import (
     GRAPH_TOPOLOGY,
     LocalCheckpointStore,
     build_graph,
+    build_prospect_search_queries,
     inspect_thread,
     resume_thread,
     run_query,
@@ -144,6 +145,7 @@ def test_run_research_passes_max_results_and_emits_progress_events(tmp_path) -> 
             search=search,
             require_review=True,
             max_results=7,
+            target_prospect_count=1,
             progress_callback=progress_events.append,
         )
     )
@@ -160,4 +162,52 @@ def test_run_research_passes_max_results_and_emits_progress_events(tmp_path) -> 
         "researcher_iteration",
         "sufficiency_routed",
         "review_interrupt",
+    ]
+
+
+def test_run_research_accumulates_business_targets_before_sufficiency(tmp_path) -> None:
+    search_queries: list[str] = []
+
+    async def search(query: str, max_results: int):
+        search_queries.append(query)
+        suffix = len(search_queries)
+        return [
+            SearchResult(
+                f"Acme {suffix}",
+                f"https://acme-{suffix}.example.com",
+                "Local service business with customer reactivation opportunity.",
+                provider="tavily",
+            )
+        ]
+
+    state = asyncio.run(
+        run_research(
+            "industry: dental practices\ngeography: Dallas\ncriteria: patient reactivation",
+            thread_id="target-thread",
+            checkpoint_dir=tmp_path,
+            search=search,
+            target_prospect_count=2,
+            max_iterations=3,
+        )
+    )
+
+    assert len(search_queries) == 2
+    assert search_queries[0] == "Dallas dental practices Contact About"
+    assert [target["organization"] for target in state["prospect_targets"]] == [
+        "Acme 1",
+        "Acme 2",
+    ]
+    assert state["events"][-2]["reason"] == "target_prospect_count"
+
+
+def test_prospect_search_queries_expand_directive_into_business_discovery_queries() -> None:
+    queries = build_prospect_search_queries(
+        "industry: med spas\ngeography: Phoenix\ncriteria: customer reactivation",
+        max_iterations=3,
+    )
+
+    assert queries == [
+        "Phoenix med spas Contact About",
+        "Phoenix med spa official website",
+        "Phoenix local med spas company",
     ]

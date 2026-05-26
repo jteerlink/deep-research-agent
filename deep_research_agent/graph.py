@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from async_multi_search import SearchResult
@@ -32,6 +33,7 @@ SearchFn = Callable[[str, int], Awaitable[Sequence[SearchResult]] | Sequence[Sea
 ProgressCallback = Callable[[dict[str, Any]], object]
 
 DEFAULT_MAX_RESEARCH_ITERATIONS = 3
+DEFAULT_TARGET_PROSPECT_COUNT = 10
 CHECKPOINT_SCHEMA_VERSION = "g003.local_checkpoint.v1"
 GRAPH_TOPOLOGY = {
     "main": ("supervisor", "review"),
@@ -63,6 +65,7 @@ class ResearchState(TypedDict, total=False):
     model_metadata: dict[str, Any]
     review_interrupt: dict[str, Any]
     prospect_targets: list[dict[str, Any]]
+    target_prospect_count: int
     artifact_paths: dict[str, str]
     warnings: list[str]
     next_node: str
@@ -203,6 +206,7 @@ class LocalResearchWorkflow:
         require_review: bool = False,
         max_iterations: int = DEFAULT_MAX_RESEARCH_ITERATIONS,
         max_results: int = 5,
+        target_prospect_count: int = DEFAULT_TARGET_PROSPECT_COUNT,
         progress_callback: ProgressCallback | None = None,
     ) -> ResearchState:
         return await run_research(
@@ -213,6 +217,7 @@ class LocalResearchWorkflow:
             require_review=require_review,
             max_iterations=max_iterations,
             max_results=max_results,
+            target_prospect_count=target_prospect_count,
             progress_callback=progress_callback,
         )
 
@@ -263,6 +268,159 @@ def _jsonable(value: Any) -> Any:
 
 def _coerce_int(value: Any, default: int) -> int:
     return int(value if value is not None and value != "" else default)
+
+
+def _clean_query_part(value: str) -> str:
+    return " ".join(value.strip().split())
+
+
+def _directive_fields(query: str) -> dict[str, str]:
+    fields: dict[str, str] = {"criteria": _clean_query_part(query)}
+    aliases = {
+        "industry": "industry",
+        "vertical": "industry",
+        "niche": "industry",
+        "geography": "geography",
+        "geographic_area": "geography",
+        "geo": "geography",
+        "location": "geography",
+        "criteria": "criteria",
+        "research_criteria": "criteria",
+    }
+    for line in query.splitlines():
+        if ":" not in line:
+            continue
+        raw_key, raw_value = line.split(":", 1)
+        key = aliases.get(raw_key.strip().lower())
+        value = _clean_query_part(raw_value)
+        if key and value:
+            fields[key] = value
+    return fields
+
+
+def build_prospect_search_queries(query: str, max_iterations: int) -> list[str]:
+    """Expand a prospect directive into business-discovery search queries."""
+
+    fields = _directive_fields(query)
+    criteria = fields.get("criteria", _clean_query_part(query))
+    industry = fields.get("industry", "")
+    geography = fields.get("geography", "")
+    focus = _clean_query_part(" ".join(part for part in (industry, geography) if part))
+    base = focus or criteria or "business prospects"
+    if focus:
+        singular_industry = industry[:-1] if industry.endswith("s") else industry
+        queries = [
+            _clean_query_part(f"{geography} {industry} Contact About"),
+            _clean_query_part(f"{geography} {singular_industry} official website"),
+            _clean_query_part(f"{geography} local {industry} company"),
+            _clean_query_part(f"{geography} {singular_industry} owner official website"),
+            _clean_query_part(f"{base} {criteria}"),
+        ]
+    else:
+        queries = [
+            _clean_query_part(f"{base} target businesses companies"),
+            _clean_query_part(f"{base} potential clients local businesses"),
+            _clean_query_part(f"{base} business directory owner founder"),
+            _clean_query_part(f"{base} companies official websites"),
+            _clean_query_part(f"{base} service providers contact"),
+        ]
+    deduped = list(dict.fromkeys(query for query in queries if query))
+    return deduped[: max(1, max_iterations)]
+
+
+def _search_query_for_iteration(query: str, iteration: int, max_iterations: int) -> str:
+    queries = build_prospect_search_queries(query, max_iterations)
+    return queries[min(iteration - 1, len(queries) - 1)]
+
+
+def _domain_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def _business_name_from_title(title: str, domain: str) -> str:
+    normalized = re.sub(r"\s+", " ", title).strip()
+    for separator in (" | ", " - ", " — ", " – ", ": "):
+        if separator in normalized:
+            parts = [part.strip() for part in normalized.split(separator) if part.strip()]
+            if parts:
+                normalized = min(parts, key=len)
+                break
+    normalized = re.sub(r"^(best|top)\s+\d+\s+", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\b(official site|homepage|website)\b", "", normalized, flags=re.I)
+    normalized = normalized.strip(" -|:")
+    if normalized.lower() in {"home", "contact", "contact us", "about", "about us"}:
+        normalized = ""
+    if normalized:
+        return normalized
+    if domain:
+        return domain.split(".")[0].replace("-", " ").title()
+    return "Unknown prospect"
+
+
+def _looks_like_business_target(record: Mapping[str, Any]) -> bool:
+    title = str(record.get("title") or "")
+    url = str(record.get("url") or "")
+    title_url = f"{title} {url}".lower()
+    domain = _domain_from_url(url)
+    if not url.startswith(("http://", "https://")):
+        return False
+    non_target_domains = (
+        "indeed.",
+        "linkedin.",
+        "facebook.",
+        "yelp.",
+        "yellowpages.",
+        "mapquest.",
+        "zocdoc.",
+        "healthgrades.",
+        "opencare.",
+        "ada.org",
+        "dcds.org",
+        "dentalpost.",
+    )
+    if any(pattern in domain for pattern in non_target_domains):
+        return False
+    non_target_patterns = (
+        "best ",
+        "top ",
+        "for sale",
+        "available",
+        "jobs",
+        "directory",
+        "how to",
+        "what is",
+        "guide",
+        "blog",
+        "article",
+        "reactivation",
+        "lead generation",
+        "sales agent",
+        "automation",
+        "software",
+        "linkedin.com/pulse",
+        "youtube.com",
+        "facebook.com",
+        "wikipedia.org",
+    )
+    return not any(pattern in title_url for pattern in non_target_patterns)
+
+
+def _dedupe_evidence(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for record in records:
+        key = _domain_from_url(str(record.get("url") or "")) or str(record.get("title") or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        copied = dict(record)
+        copied["id"] = f"ev_{len(deduped) + 1}"
+        deduped.append(copied)
+    return deduped
 
 
 def _append_event(
@@ -415,10 +573,16 @@ def route_after_supervisor(state: Mapping[str, Any]) -> str:
     """Route to researcher, review, or finish from compatibility supervisor state."""
 
     evidence = list(state.get("evidence", []))
+    prospects = list(state.get("prospect_targets", []))
     iteration = int(state.get("iteration", state.get("research_iterations", 0)) or 0)
     max_iterations = int(state.get("max_iterations", DEFAULT_MAX_RESEARCH_ITERATIONS) or 0)
+    target_count = int(state.get("target_prospect_count", 0) or 0)
     if state.get("review_required") and not state.get("review_approved"):
         return "review"
+    if target_count > 0:
+        if len(prospects) >= target_count or iteration >= max_iterations:
+            return "finish"
+        return "researcher"
     if evidence or iteration >= max_iterations:
         return "finish"
     return "researcher"
@@ -435,12 +599,15 @@ async def _call_search(
     return result
 
 
-def _evidence_from_results(results: Sequence[SearchResult]) -> list[dict[str, Any]]:
+def _evidence_from_results(
+    results: Sequence[SearchResult], *, start_index: int = 1, search_query: str = ""
+) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
     for index, result in enumerate(results, start=1):
         evidence.append(
             {
-                "id": f"ev_{index}",
+                "id": f"ev_{start_index + index - 1}",
+                "query": search_query,
                 "title": result.title,
                 "url": result.url,
                 "snippet": getattr(result, "snippet", getattr(result, "content", "")),
@@ -453,9 +620,16 @@ def _evidence_from_results(results: Sequence[SearchResult]) -> list[dict[str, An
 
 def _prospects_from_evidence(evidence: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     prospects: list[dict[str, Any]] = []
+    seen_domains: set[str] = set()
     for record in evidence:
+        if not _looks_like_business_target(record):
+            continue
         evidence_id = str(record.get("id", ""))
-        organization = str(record.get("title") or record.get("url") or "Unknown prospect")
+        domain = _domain_from_url(str(record.get("url") or ""))
+        if domain in seen_domains:
+            continue
+        seen_domains.add(domain)
+        organization = _business_name_from_title(str(record.get("title") or ""), domain)
         snippet = str(record.get("snippet") or "")
         citation = ProspectCitation(
             evidence_id=evidence_id,
@@ -471,8 +645,8 @@ def _prospects_from_evidence(evidence: Sequence[Mapping[str, Any]]) -> list[dict
             confidence=0.55 if record.get("source_type") == "snippet" else 0.75,
             decision_maker_leads=("Founder/CEO", "Head of Growth"),
             fit_rationale=(
-                "Candidate is included for discovery review based on cited search evidence; "
-                "confirm fit with page-read evidence before outreach."
+                "Potential business target surfaced by company-discovery search; confirm fit "
+                "with page-read evidence before outreach."
             ),
             personalized_angles=(
                 snippet[:180] if snippet else "Use cited discovery evidence to tailor outreach.",
@@ -481,6 +655,8 @@ def _prospects_from_evidence(evidence: Sequence[Mapping[str, Any]]) -> list[dict
             metadata={
                 "evidence_type": record.get("source_type", "snippet"),
                 "provider": record.get("provider", ""),
+                "domain": domain,
+                "search_query": record.get("query", ""),
             },
         )
         prospects.append(prospect.to_dict())
@@ -521,6 +697,7 @@ async def run_research(
     require_review: bool = False,
     max_iterations: int = DEFAULT_MAX_RESEARCH_ITERATIONS,
     max_results: int = 5,
+    target_prospect_count: int = DEFAULT_TARGET_PROSPECT_COUNT,
     progress_callback: ProgressCallback | None = None,
     review_approved: bool = False,
     existing_state: Mapping[str, Any] | None = None,
@@ -559,6 +736,7 @@ async def run_research(
         "iteration": 0,
         "max_iterations": max_iterations,
         "max_results": max_results,
+        "target_prospect_count": target_prospect_count,
         "evidence": [],
         "findings": [],
         "fallback_events": [],
@@ -572,31 +750,72 @@ async def run_research(
     await record("main", "main_started")
 
     while route_after_supervisor(state) == "researcher":
+        next_iteration = int(state.get("iteration", 0)) + 1
+        search_query = _search_query_for_iteration(query, next_iteration, max_iterations)
         await record("supervisor", "supervisor_delegated", target="researcher")
-        await record("search", "search_started", max_results=max_results)
-        results = await _call_search(search, query, max_results=max_results)
-        await record("search", "search_completed", result_count=len(results))
-        state["evidence"] = _evidence_from_results(results)
+        await record(
+            "search",
+            "search_started",
+            query=search_query,
+            max_results=max_results,
+            target_prospect_count=target_prospect_count,
+        )
+        results = await _call_search(search, search_query, max_results=max_results)
+        await record("search", "search_completed", query=search_query, result_count=len(results))
+        state["evidence"] = _dedupe_evidence(
+            [
+                *list(state.get("evidence", [])),
+                *_evidence_from_results(
+                    results,
+                    start_index=len(state.get("evidence", [])) + 1,
+                    search_query=search_query,
+                ),
+            ]
+        )
         state["findings"] = list(state["evidence"])
         state["prospect_targets"] = _prospects_from_evidence(state["evidence"])
-        state["iteration"] = int(state.get("iteration", 0)) + 1
+        state["iteration"] = next_iteration
         model_response = await build_model_client().invoke(
             ModelRequest(
                 node="researcher",
-                prompt=query,
+                prompt=search_query,
                 metadata={"thread_id": selected_thread_id, "iteration": state["iteration"]},
             )
         )
         state["model_metadata"] = model_response.to_dict()
         await record("model", "fallback_model_used", provider=model_response.provider.value)
-        await record("researcher", "researcher_iteration", iteration=state["iteration"])
-        if state["evidence"] or int(state["iteration"]) >= max_iterations:
+        await record(
+            "researcher",
+            "researcher_iteration",
+            iteration=state["iteration"],
+            prospect_count=len(state["prospect_targets"]),
+        )
+        if len(state["prospect_targets"]) >= target_prospect_count or int(
+            state["iteration"]
+        ) >= max_iterations:
             state["sufficient"] = True
-            await record("supervisor", "sufficiency_routed")
+            reason = (
+                "target_prospect_count"
+                if len(state["prospect_targets"]) >= target_prospect_count
+                else "max_iterations"
+            )
+            await record("supervisor", "sufficiency_routed", reason=reason)
             break
 
     if not state["evidence"]:
         state["warnings"].append("No search evidence was captured; prospect exports are empty.")
+        await record("warning", "warning_recorded", message=state["warnings"][-1])
+    elif not state["prospect_targets"]:
+        state["warnings"].append(
+            "Search evidence was captured, but no clear business prospects were extracted. "
+            "Add a target industry/niche and geography for stronger company discovery."
+        )
+        await record("warning", "warning_recorded", message=state["warnings"][-1])
+    elif len(state["prospect_targets"]) < target_prospect_count:
+        state["warnings"].append(
+            f"Only {len(state['prospect_targets'])} potential business target(s) were found "
+            f"before the iteration limit of {max_iterations}."
+        )
         await record("warning", "warning_recorded", message=state["warnings"][-1])
 
     if require_review and not review_approved:

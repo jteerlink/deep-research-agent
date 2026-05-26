@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 async def _mock_search(query: str, max_results: int):
-    assert query == "acme research"
+    assert "acme research" in query
     assert max_results >= 1
     return [
         SearchResult(
@@ -68,6 +68,28 @@ def test_supervisor_delegates_until_sufficient_or_max_iteration() -> None:
         == "researcher"
     )
     assert route_after_supervisor({"evidence": [{"id": "ev_1"}], "iteration": 1}) == "finish"
+    assert (
+        route_after_supervisor(
+            {
+                "prospect_targets": [{"organization": "Acme"}],
+                "iteration": 1,
+                "max_iterations": 3,
+                "target_prospect_count": 2,
+            }
+        )
+        == "researcher"
+    )
+    assert (
+        route_after_supervisor(
+            {
+                "prospect_targets": [{"organization": "Acme"}, {"organization": "Beta"}],
+                "iteration": 1,
+                "max_iterations": 3,
+                "target_prospect_count": 2,
+            }
+        )
+        == "finish"
+    )
     assert route_after_supervisor({"evidence": [], "iteration": 2, "max_iterations": 2}) == "finish"
     assert (
         route_after_supervisor(

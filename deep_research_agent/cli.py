@@ -103,6 +103,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum search results requested per researcher iteration.",
     )
     run_parser.add_argument(
+        "--target-prospect-count",
+        type=int,
+        default=10,
+        help="Potential business targets to collect before sufficiency routing.",
+    )
+    run_parser.add_argument(
         "--approve",
         action="store_true",
         help="Approve review immediately instead of stopping at the review interrupt.",
@@ -209,6 +215,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         require_review=not args.approve,
                         max_iterations=args.max_iterations,
                         max_results=args.max_results,
+                        target_prospect_count=args.target_prospect_count,
                         review_approved=args.approve,
                         artifact_dir=args.artifact_dir,
                     )
@@ -235,6 +242,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     require_review=args.require_review,
                     max_iterations=args.max_iterations,
                     max_results=args.max_results,
+                    target_prospect_count=args.target_prospect_count,
                     review_approved=args.approve,
                     artifact_dir=args.artifact_dir,
                 )

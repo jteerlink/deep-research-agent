@@ -25,7 +25,9 @@ deep-research-agent ui
 ```
 
 The UI reads provider keys from `.env` or already-exported shell environment
-variables; it does not ask for secrets in the browser.
+variables; it does not ask for secrets in the browser. Fill industry/niche,
+geography, and research criteria so runs search for potential business targets
+rather than generic articles about a topic.
 
 ## Local G003 workflow
 

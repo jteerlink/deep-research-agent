@@ -48,11 +48,18 @@ python -m pip install -e '.[ui]'
 deep-research-agent ui
 ```
 
-The UI supports query/thread settings, max iterations, checkpoint/artifact
+The UI supports target industry/niche, geography, research criteria, target
+prospect count, thread settings, max iterations, checkpoint/artifact
 directories, review approval, search max results/timeout, provider API key
 status from `.env` or shell environment, run/resume/inspect buttons, a progress
 timeline, warnings, evidence/prospect previews, artifact paths, markdown
 preview, and raw JSON. Provider keys are not typed into the UI.
+
+For live prospect discovery, fill at least industry/niche and geography. A broad
+query such as `AI agency lead reactivation targets` tends to find vendor pages or
+articles; a directive such as `dental practices`, `Dallas-Fort Worth`, and
+`patient reactivation opportunity` produces company-discovery searches and
+returns potential business targets.
 
 ## Model configuration
 
@@ -114,6 +121,9 @@ Expected results:
 - `run` returns JSON with `status: "interrupted"`, a stable `thread_id`,
   evidence from the mocked search result, model metadata, and review interrupt
   details.
+- Live runs expand the directive into multiple company-discovery searches and
+  stop when enough deduplicated potential business targets are found or when the
+  iteration limit is reached.
 - `resume --approve-review` returns JSON with `status: "completed"` for the
   same thread id, preserving checkpointed evidence and prospect targets.
 - `inspect --thread-id` returns the persisted checkpoint state from the same

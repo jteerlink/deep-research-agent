@@ -20,13 +20,23 @@ from async_multi_search import AsyncMultiProviderSearch
 
 try:
     from .config import dotenv_values
-    from .graph import inspect_checkpoints, resume_research, run_research
+    from .graph import (
+        DEFAULT_TARGET_PROSPECT_COUNT,
+        inspect_checkpoints,
+        resume_research,
+        run_research,
+    )
 except ImportError:
     if __package__:
         raise
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from deep_research_agent.config import dotenv_values
-    from deep_research_agent.graph import inspect_checkpoints, resume_research, run_research
+    from deep_research_agent.graph import (
+        DEFAULT_TARGET_PROSPECT_COUNT,
+        inspect_checkpoints,
+        resume_research,
+        run_research,
+    )
 
 PROVIDER_API_KEY_FIELDS: tuple[tuple[str, str], ...] = (
     ("Tavily", "TAVILY_API_KEY"),
@@ -75,6 +85,19 @@ def provider_env_from_env_file(
     merged = dotenv_values(path) if os.fspath(path).strip() else {}
     merged.update(current)
     return provider_env_overlay(merged)
+
+
+def build_prospect_directive(industry: str, geography: str, criteria: str) -> str:
+    """Build the structured free-text directive consumed by the research graph."""
+
+    parts = []
+    if industry.strip():
+        parts.append(f"industry: {industry.strip()}")
+    if geography.strip():
+        parts.append(f"geography: {geography.strip()}")
+    if criteria.strip():
+        parts.append(f"criteria: {criteria.strip()}")
+    return "\n".join(parts) if parts else "criteria: business prospects"
 
 
 def env_file_overlay(
@@ -162,9 +185,20 @@ def render_app() -> None:
 
     with st.sidebar:
         st.header("Execution")
-        query = st.text_area("Query", "AI agency lead reactivation targets")
+        industry = st.text_input("Industry / niche", "")
+        geography = st.text_input("Geographic area", "")
+        query = st.text_area(
+            "Research criteria",
+            "Likely need lead reactivation, customer winback, or dormant-database follow-up.",
+        )
         thread_id = st.text_input("Thread ID", "")
         max_iterations = st.number_input("Max iterations", min_value=1, max_value=25, value=3)
+        target_prospect_count = st.number_input(
+            "Target prospects",
+            min_value=1,
+            max_value=100,
+            value=DEFAULT_TARGET_PROSPECT_COUNT,
+        )
         checkpoint_dir = st.text_input("Checkpoint dir", DEFAULT_CHECKPOINT_DIR)
         artifact_dir = st.text_input("Artifact dir", DEFAULT_ARTIFACT_DIR)
         require_review = st.checkbox("Require review", value=True)
@@ -202,16 +236,18 @@ def render_app() -> None:
         if run_clicked:
             st.session_state.events = []
             searcher = AsyncMultiProviderSearch(timeout=int(timeout_seconds))
+            research_query = build_prospect_directive(industry, geography, query)
             with temporary_env(runtime_env):
                 state = asyncio.run(
                     run_research(
-                        query,
+                        research_query,
                         thread_id=thread_id or None,
                         checkpoint_dir=checkpoint_dir,
                         search=searcher.search,
                         require_review=require_review,
                         max_iterations=int(max_iterations),
                         max_results=int(search_max_results),
+                        target_prospect_count=int(target_prospect_count),
                         progress_callback=progress,
                         review_approved=approve_review,
                         artifact_dir=artifact_dir,
