@@ -280,7 +280,11 @@ def test_resume_preserves_checkpointed_evidence_and_artifacts(tmp_path) -> None:
     assert resumed["evidence"] == interrupted["evidence"]
     assert resumed["findings"] == interrupted["findings"]
     assert resumed["prospect_targets"] == interrupted["prospect_targets"]
-    assert Path(resumed["artifact_paths"]["json"]).exists()
+    assert resumed["prospect_reviews"] == interrupted["prospect_reviews"]
+    assert resumed["prospect_rejections"] == interrupted["prospect_rejections"]
+    artifact_payload = json.loads(Path(resumed["artifact_paths"]["json"]).read_text())
+    assert artifact_payload["metadata"]["prospect_reviews"] == interrupted["prospect_reviews"]
+    assert artifact_payload["metadata"]["prospect_rejections"] == interrupted["prospect_rejections"]
 
 
 def test_cli_approve_alias_writes_artifacts(tmp_path) -> None:

@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 import httpx
 
 TriageDecision = Literal["reject", "judge", "fetch_then_judge"]
+QualificationStatus = Literal["qualified", "needs_review", "rejected"]
 
 MIN_ACCEPTED_FIT_SCORE = 0.55
 MIN_ACCEPTED_CONFIDENCE = 0.5
@@ -74,13 +75,48 @@ _DOMAIN_CATEGORIES: dict[str, tuple[str, ...]] = {
     ),
     "reference": ("wikipedia.org", "wikidata.org"),
     "search": ("google.com", "bing.com", "duckduckgo.com"),
+    "association": (
+        "acca.org",
+        "phcc-tx.org",
+        "tacca.org",
+    ),
+    "education": (
+        "edu",
+        "techzonehvacr.com",
+    ),
+    "government": ("gov",),
+    "manufacturer": (
+        "amana-hac.com",
+        "carrier.com",
+        "daikincomfort.com",
+        "goodmanmfg.com",
+        "lennox.com",
+        "northamerica-daikin.com",
+        "nortekair.com",
+        "nortekhvac.com",
+        "rheem.com",
+        "samsunghvac.com",
+        "trane.com",
+        "york.com",
+    ),
+    "national_brand": (
+        "aireserv.com",
+        "ars.com",
+        "onehourheatandair.com",
+        "serviceexperts.com",
+    ),
 }
 
 _REJECTED_CATEGORIES = {
+    "association",
     "directory",
+    "education",
+    "government",
     "social",
     "job_board",
     "health_directory",
+    "manufacturer",
+    "national_brand",
     "reference",
     "search",
 }
@@ -127,6 +163,7 @@ _GENERIC_TITLE_STARTS = (
     "homepage",
     "official website",
     "top-rated",
+    "top rated",
     "best ",
     "local ",
     "emergency ",
@@ -135,14 +172,103 @@ _GENERIC_TITLE_STARTS = (
 )
 
 _VENDOR_NOISE_PATTERNS = (
+    "lead finder",
+    "leadfinder",
     "lead generation software",
     "marketing automation",
     "crm software",
     "sales automation",
+    "prospecting software",
     "business directory",
     "find a contractor",
     "find contractors",
 )
+
+_ENTITY_NOISE_PATTERNS: dict[str, tuple[str, ...]] = {
+    "association": (
+        "association",
+        "professional trade association",
+        "not for profit professional",
+        "industry leadership",
+        "advocacy",
+        "chapter",
+    ),
+    "education": (
+        "school",
+        "college",
+        "campus",
+        "training program",
+        "technician training",
+        "become a certified",
+        "classes",
+        "tuition",
+    ),
+    "government": (
+        "department of licensing",
+        "verify a license",
+        "renew a license",
+        "apply for a license",
+        "advisory board",
+        "state agency",
+    ),
+    "manufacturer": (
+        "manufacturing",
+        "manufacturer",
+        "heating and cooling products",
+        "ductless and vrf systems",
+        "our brands",
+        "professional portal",
+        "dealer locator",
+    ),
+    "national_brand": (
+        "find a location",
+        "franchise",
+        "national franchise",
+        "national account",
+        "corporate office",
+    ),
+}
+
+_ENTITY_NOISE_CATEGORIES = {
+    "association",
+    "education",
+    "government",
+    "manufacturer",
+    "national_brand",
+}
+
+_REQUESTED_ENTITY_TERMS: dict[str, tuple[str, ...]] = {
+    "association": ("association", "associations", "chapter", "chapters"),
+    "education": (
+        "college",
+        "colleges",
+        "school",
+        "schools",
+        "training",
+        "training program",
+        "trade school",
+    ),
+    "government": ("government", "agency", "agencies", "regulator", "public sector"),
+    "manufacturer": (
+        "manufacturer",
+        "manufacturers",
+        "manufacturing",
+        "distributor",
+        "distributors",
+    ),
+    "national_brand": (
+        "chain",
+        "chains",
+        "franchise",
+        "franchises",
+        "multi location",
+        "national brand",
+        "national brands",
+    ),
+}
+
+_REVIEW_ONLY_MODEL_STATUSES = {"metadata_only", "model_unavailable", "no_available_model"}
+_REVIEW_ONLY_JUDGMENT_MODES = {"deterministic_fallback"}
 
 _OWNED_SNIPPET_SIGNALS = (
     "we provide",
@@ -254,6 +380,27 @@ class ProspectJudgment:
 
 
 @dataclass(frozen=True)
+class ProspectQualification:
+    """Export and sufficiency eligibility for a reviewed prospect candidate."""
+
+    qualification_status: QualificationStatus
+    export_qualified: bool
+    sufficiency_qualified: bool
+    review_only: bool
+    review_only_reason: str = ""
+    qualification_reasons: tuple[str, ...] = ()
+    qualification_warnings: tuple[str, ...] = ()
+    fallback_metadata: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["qualification_reasons"] = list(self.qualification_reasons)
+        payload["qualification_warnings"] = list(self.qualification_warnings)
+        payload["fallback_metadata"] = dict(self.fallback_metadata or {})
+        return payload
+
+
+@dataclass(frozen=True)
 class CandidateReview:
     """Auditable result for one candidate after triage and judgment."""
 
@@ -263,6 +410,7 @@ class CandidateReview:
     page_evidence_id: str = ""
     page_text: str = ""
     error: str = ""
+    qualification: ProspectQualification | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -271,6 +419,7 @@ class CandidateReview:
             "judgment": self.judgment.to_dict() if self.judgment else None,
             "page_evidence_id": self.page_evidence_id,
             "error": self.error,
+            "qualification": self.qualification.to_dict() if self.qualification else None,
         }
 
 
@@ -303,6 +452,11 @@ def canonical_website(url: str) -> str:
 
 
 def business_name_from_title(title: str, domain: str) -> str:
+    domain_name = ""
+    if domain:
+        first_label = registrable_domain(domain).split(".")[0]
+        domain_name = _readable_business_name(first_label)
+
     normalized = re.sub(r"\s+", " ", html.unescape(title)).strip()
     if normalized:
         parts = [normalized]
@@ -310,24 +464,36 @@ def business_name_from_title(title: str, domain: str) -> str:
             if separator in normalized:
                 parts = [part.strip() for part in normalized.split(separator) if part.strip()]
                 break
-        brand_parts = [part for part in parts if not _looks_generic_title(part)]
+        brand_parts = []
+        for part in parts:
+            if _looks_generic_title(part) or _looks_geography_only(part):
+                continue
+            readable = _readable_business_name(part)
+            if _prefer_domain_name_for_title(part, readable, domain_name):
+                readable = domain_name
+            brand_parts.append(readable)
+        brand_parts = [part for part in brand_parts if part]
         if brand_parts:
             return min(brand_parts, key=len).strip(" -|:")
-    if domain:
-        first_label = registrable_domain(domain).split(".")[0]
-        return re.sub(r"[-_]+", " ", first_label).title()
+    if domain_name:
+        return domain_name
     return "Unknown prospect"
 
 
-def triage_candidate(candidate: ProspectCandidate) -> CandidateTriage:
+def triage_candidate(
+    candidate: ProspectCandidate,
+    *,
+    directive: Mapping[str, str] | None = None,
+) -> CandidateTriage:
     if not candidate.url.startswith(("http://", "https://")) or not candidate.root_domain:
         return CandidateTriage("reject", "invalid", "invalid_url", "URL is not an absolute web URL")
 
     source_category = source_category_for_domain(candidate.root_domain)
     page_intent = page_intent_for_candidate(candidate)
     flags = _candidate_flags(candidate, source_category, page_intent)
+    requested_categories = _requested_entity_categories(directive)
 
-    if source_category in _REJECTED_CATEGORIES:
+    if source_category in _REJECTED_CATEGORIES and source_category not in requested_categories:
         return CandidateTriage(
             "reject",
             source_category,
@@ -349,6 +515,27 @@ def triage_candidate(candidate: ProspectCandidate) -> CandidateTriage:
             source_category,
             page_intent,
             "Result appears to sell prospecting or marketing software instead of being a target",
+            flags,
+        )
+    entity_noise = sorted(
+        flag
+        for flag in flags
+        if flag in _ENTITY_NOISE_CATEGORIES and flag not in requested_categories
+    )
+    if entity_noise:
+        if source_category == "owned_or_unknown" and "owned_business_signal" in flags:
+            return CandidateTriage(
+                "fetch_then_judge",
+                source_category,
+                page_intent,
+                f"{entity_noise[0]} signals on an owned domain require review",
+                flags,
+            )
+        return CandidateTriage(
+            "reject",
+            source_category,
+            page_intent,
+            f"{entity_noise[0]} sources are not local operating prospect accounts",
             flags,
         )
     if "generic_title" in flags or page_intent in {"contact", "about", "service"}:
@@ -373,6 +560,21 @@ def source_category_for_domain(root_domain: str) -> str:
         if any(root_domain == domain or root_domain.endswith(f".{domain}") for domain in domains):
             return category
     return "owned_or_unknown"
+
+
+def _requested_entity_categories(directive: Mapping[str, str] | None) -> set[str]:
+    if not directive:
+        return set()
+    haystack = " ".join(str(value) for value in directive.values()).lower()
+    haystack = re.sub(r"[^a-z0-9]+", " ", haystack)
+    requested: set[str] = set()
+    for category, terms in _REQUESTED_ENTITY_TERMS.items():
+        for term in terms:
+            normalized = re.sub(r"[^a-z0-9]+", " ", term.lower()).strip()
+            if re.search(rf"\b{re.escape(normalized)}\b", haystack):
+                requested.add(category)
+                break
+    return requested
 
 
 def page_intent_for_candidate(candidate: ProspectCandidate) -> str:
@@ -571,6 +773,77 @@ def is_accepted_prospect(judgment: ProspectJudgment) -> bool:
     )
 
 
+def prospect_qualification(
+    judgment: ProspectJudgment,
+    triage: CandidateTriage,
+    *,
+    model_status: str = "",
+) -> ProspectQualification:
+    """Return explicit export/sufficiency status for a candidate judgment."""
+
+    fallback_metadata = {
+        "judgment_mode": judgment.mode,
+        "model_judgment_status": model_status,
+    }
+    reasons: list[str] = []
+    warnings: list[str] = []
+    threshold_accepted = is_accepted_prospect(judgment)
+    if triage.decision == "reject":
+        reasons.append(triage.reason)
+        return ProspectQualification(
+            "rejected",
+            export_qualified=False,
+            sufficiency_qualified=False,
+            review_only=False,
+            qualification_reasons=tuple(reasons),
+            fallback_metadata=fallback_metadata,
+        )
+    if not threshold_accepted:
+        reasons.append(judgment.reject_reason or "Candidate did not meet prospect thresholds")
+        return ProspectQualification(
+            "rejected",
+            export_qualified=False,
+            sufficiency_qualified=False,
+            review_only=False,
+            qualification_reasons=tuple(reasons),
+            fallback_metadata=fallback_metadata,
+        )
+    if model_status in _REVIEW_ONLY_MODEL_STATUSES:
+        reason = f"model_judgment_{model_status}"
+        warnings.append(reason)
+        return ProspectQualification(
+            "needs_review",
+            export_qualified=False,
+            sufficiency_qualified=False,
+            review_only=True,
+            review_only_reason=reason,
+            qualification_reasons=(reason,),
+            qualification_warnings=tuple(warnings),
+            fallback_metadata=fallback_metadata,
+        )
+    if judgment.mode in _REVIEW_ONLY_JUDGMENT_MODES:
+        reason = "deterministic_fallback_requires_review"
+        warnings.append(reason)
+        return ProspectQualification(
+            "needs_review",
+            export_qualified=False,
+            sufficiency_qualified=False,
+            review_only=True,
+            review_only_reason=reason,
+            qualification_reasons=(reason,),
+            qualification_warnings=tuple(warnings),
+            fallback_metadata=fallback_metadata,
+        )
+    return ProspectQualification(
+        "qualified",
+        export_qualified=True,
+        sufficiency_qualified=True,
+        review_only=False,
+        qualification_reasons=("accepted_by_structured_judgment",),
+        fallback_metadata=fallback_metadata,
+    )
+
+
 def _candidate_flags(
     candidate: ProspectCandidate, source_category: str, page_intent: str
 ) -> tuple[str, ...]:
@@ -584,6 +857,9 @@ def _candidate_flags(
         flags.append("generic_title")
     if any(pattern in text for pattern in _VENDOR_NOISE_PATTERNS):
         flags.append("vendor_noise")
+    for flag, patterns in _ENTITY_NOISE_PATTERNS.items():
+        if any(pattern in text for pattern in patterns):
+            flags.append(flag)
     if _has_owned_signal(candidate):
         flags.append("owned_business_signal")
     return tuple(dict.fromkeys(flags))
@@ -595,16 +871,44 @@ def _has_owned_signal(candidate: ProspectCandidate, page_text: str = "") -> bool
         candidate.root_domain
         and source_category_for_domain(candidate.root_domain) == "owned_or_unknown"
     ):
-        if candidate.organization_guess and candidate.organization_guess != "Unknown prospect":
+        if (
+            candidate.organization_guess
+            and candidate.organization_guess != "Unknown prospect"
+            and not _looks_geography_only(candidate.organization_guess)
+        ):
             return True
     return any(signal in text for signal in _OWNED_SNIPPET_SIGNALS)
 
 
 def _looks_generic_title(title: str) -> bool:
     value = re.sub(r"\s+", " ", title).strip().lower()
+    value = re.sub(r"[\u00ae\u2122\u00a9]", "", value).strip()
+    value = value.replace("a/c", "ac")
     if not value:
         return True
-    if value in {"home", "homepage", "contact", "contact us", "about", "about us"}:
+    if _looks_geography_only(value):
+        return True
+    generic_exact = {
+        "home",
+        "homepage",
+        "contact",
+        "contact us",
+        "about",
+        "about us",
+        "hvac",
+        "24/7 emergency",
+        "24 7 emergency",
+        "repair & installation",
+        "repair and installation",
+        "geothermal installation",
+        "trane",
+        "carrier",
+        "lennox",
+        "goodman",
+        "daikin",
+        "rheem",
+    }
+    if value in generic_exact:
         return True
     if any(value.startswith(prefix) for prefix in _GENERIC_TITLE_STARTS):
         return True
@@ -612,17 +916,149 @@ def _looks_generic_title(title: str) -> bool:
         return True
     service_terms = (
         "hvac",
+        "ac",
+        "a c",
         "air conditioning",
         "heating",
+        "heater",
+        "furnace",
         "plumbing",
         "roofing",
         "dental",
         "dentist",
         "med spa",
         "refrigeration",
+        "geothermal",
     )
-    generic_endings = (" company", " contractor", " services", " service")
-    return any(term in value for term in service_terms) and value.endswith(generic_endings)
+    if not any(term in value for term in service_terms):
+        return False
+    generic_descriptors = (
+        "company",
+        "contractor",
+        "installation",
+        "repair",
+        "repairs",
+        "service",
+        "services",
+        "supply",
+        "pros",
+    )
+    if any(re.search(rf"\b{descriptor}\b", value) for descriptor in generic_descriptors):
+        return True
+    return _starts_with_service_and_mentions_geography(value)
+
+
+def _looks_geography_only(value: str) -> bool:
+    normalized = re.sub(r"\s+", " ", value).strip().lower()
+    normalized = normalized.strip(" -|:")
+    normalized = re.sub(r"[-_/]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    if re.fullmatch(r"[a-z .'-]+,\s*(tx|texas|ca|fl|ga|az|wa|mn|ma|pa|nc|dc|md|va)", normalized):
+        return True
+    return normalized in {
+        "north texas",
+        "dfw",
+        "united states",
+        "dallas",
+        "fort worth",
+        "dallas fort worth",
+        "fort worth tx",
+        "dallas tx",
+        "plano tx",
+        "frisco tx",
+        "arlington tx",
+    }
+
+
+def _readable_business_name(value: str) -> str:
+    cleaned = re.sub(r"^#+\s*", "", html.unescape(value)).strip(" -|:")
+    cleaned = re.sub(r"(?i)^at\s+", "", cleaned)
+    cleaned = re.split(r"(?i)\bwe\s+(?:are|provide|offer)\b", cleaned, maxsplit=1)[0]
+    cleaned = cleaned.strip(" -|:")
+    if re.search(r"[\s&]", cleaned):
+        return _title_preserving_acronyms(cleaned)
+
+    compact = re.sub(r"[^A-Za-z0-9]+", " ", cleaned).strip().lower()
+    compact = re.sub(r"\bnorthtexas\b", "north texas", compact)
+    compact = re.sub(r"\bnorthtx\b", "north texas", compact)
+    compact = re.sub(r"northtexas", "north texas ", compact)
+    compact = re.sub(r"northtx", "north texas ", compact)
+    compact = re.sub(r"\btx(?=[a-z])", "tx ", compact)
+    compact = re.sub(r"(?<=[a-z])tx\b", " tx", compact)
+    compact = re.sub(r"dfw", " dfw ", compact)
+    compact = re.sub(r"hvacr", " hvacr ", compact)
+    compact = re.sub(r"hvac", " hvac ", compact)
+    compact = re.sub(r"(?<=[a-z])air(?=\s+conditioning\b)", " air", compact)
+    compact = re.sub(r"(?<=[a-z])express(?=\s|$)", " express", compact)
+    compact = re.sub(r"(?<=[a-z])pro(?=(?:dfw|dallas|tx|$))", " pro ", compact)
+    for token in (
+        "brothers",
+        "conditioning",
+        "express",
+        "geothermal",
+        "heat",
+        "mechanical",
+        "mechanics",
+        "cooling",
+        "heating",
+        "plumbing",
+        "company",
+        "air",
+    ):
+        compact = re.sub(rf"(?<=\w){token}(?=\w|$)", f" {token} ", compact)
+    compact = re.sub(r"(?<=[a-z])air(?=\s+conditioning\b)", " air", compact)
+    compact = re.sub(r"(?<=\w)comfort(?=hvac|$)", " comfort ", compact)
+    compact = re.sub(r"(?<=\w)services?$", " service", compact)
+    compact = re.sub(r"\s+", " ", compact).strip()
+    return _title_preserving_acronyms(compact or cleaned)
+
+
+def _prefer_domain_name_for_title(raw_title: str, readable_title: str, domain_name: str) -> bool:
+    if not domain_name or not readable_title:
+        return False
+    title_key = _compact_name_key(raw_title)
+    domain_key = _compact_name_key(domain_name)
+    readable_key = _compact_name_key(readable_title)
+    if not title_key or not domain_key:
+        return False
+    if title_key == domain_key:
+        return True
+    if _looks_generic_title(raw_title) and domain_key in title_key:
+        return True
+    if readable_key and title_key == readable_key and title_key in domain_key:
+        return True
+    return False
+
+
+def _compact_name_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def _starts_with_service_and_mentions_geography(value: str) -> bool:
+    starts_with_service = re.match(
+        r"^(?:ac|air conditioning|heating|heater|furnace|hvac|plumbing)\b", value
+    )
+    if not starts_with_service:
+        return False
+    return bool(
+        re.search(
+            r"\b(?:dallas|fort worth|dfw|texas|tx|county|haltom city|plano|frisco|arlington)\b",
+            value,
+        )
+    )
+
+
+def _title_preserving_acronyms(value: str) -> str:
+    acronyms = {"ac", "dfw", "hts", "hvac", "hvacr", "mfg", "tx", "vrf"}
+    words = re.split(r"(\s+)", value)
+    titled: list[str] = []
+    for word in words:
+        lower = word.lower()
+        if lower in acronyms:
+            titled.append(lower.upper())
+        else:
+            titled.append(word[:1].upper() + word[1:].lower())
+    return "".join(titled).strip()
 
 
 def _bounded_float(value: Any, default: float) -> float:

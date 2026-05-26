@@ -29,6 +29,7 @@ from .models import ModelClient, ModelRequest, build_model_client
 from .prospect_judgment import (
     CandidateReview,
     ProspectCandidate,
+    ProspectQualification,
     build_prospect_judge_prompt,
     business_name_from_title,
     canonical_website,
@@ -36,8 +37,8 @@ from .prospect_judgment import (
     deterministic_judgment,
     domain_from_url,
     fetch_page_text,
-    is_accepted_prospect,
     prospect_judgment_schema,
+    prospect_qualification,
     registrable_domain,
     triage_candidate,
 )
@@ -57,6 +58,7 @@ GRAPH_TOPOLOGY = {
     "supervisor": ("researcher", "review", "finish"),
     "researcher": ("supervisor",),
 }
+ARTIFACT_SUMMARY_MAX_CHARS = 600
 
 
 class ResearchState(TypedDict, total=False):
@@ -103,6 +105,7 @@ class ProspectExtractionResult:
     reviews: list[dict[str, Any]]
     rejections: list[dict[str, Any]]
     extra_evidence: list[dict[str, Any]]
+    warnings: list[str]
 
 
 @dataclass(frozen=True)
@@ -647,21 +650,29 @@ async def _prospects_from_evidence(
     page_fetch: PageFetchFn | None = None,
     geography_scope: Mapping[str, Any] | None = None,
 ) -> ProspectExtractionResult:
-    candidates = _candidate_reviews_from_evidence(evidence)
+    directive = _directive_fields(query)
+    candidates = _candidate_reviews_from_evidence(evidence, directive=directive)
     selected, duplicate_rejections = _select_best_reviews_by_domain(candidates)
     prospects: list[dict[str, Any]] = []
     reviews: list[dict[str, Any]] = []
     rejections: list[dict[str, Any]] = list(duplicate_rejections)
     extra_evidence: list[dict[str, Any]] = []
+    warnings: list[str] = []
     page_text_by_domain = _page_text_by_domain(evidence)
-    directive = _directive_fields(query)
     normalized_geography_scope = dict(geography_scope or geography_scope_for_query(query).to_dict())
 
     for review in selected:
         candidate = review.candidate
         triage = review.triage
         if triage.decision == "reject":
-            rejected = review.to_dict()
+            judgment = deterministic_judgment(candidate, triage)
+            qualification = prospect_qualification(judgment, triage)
+            rejected = CandidateReview(
+                candidate=candidate,
+                triage=triage,
+                judgment=judgment,
+                qualification=qualification,
+            ).to_dict()
             rejections.append(rejected)
             reviews.append(rejected)
             continue
@@ -685,6 +696,7 @@ async def _prospects_from_evidence(
                 )
 
         judgment_error = ""
+        model_status = ""
         if enable_llm_judgment:
             try:
                 model_response = await model_client.invoke(
@@ -706,9 +718,11 @@ async def _prospects_from_evidence(
                     )
                 )
                 structured = model_response.structured or {}
-                if structured.get("status") in {"model_unavailable", "no_available_model"}:
+                status = str(structured.get("status") or "")
+                if status in {"metadata_only", "model_unavailable", "no_available_model"}:
                     judgment = deterministic_judgment(candidate, triage, page_text=page_text)
-                    judgment_error = str(structured.get("status", "model_unavailable"))
+                    judgment_error = status
+                    model_status = status
                 else:
                     judgment = coerce_prospect_judgment(
                         structured, candidate=candidate, triage=triage
@@ -716,11 +730,13 @@ async def _prospects_from_evidence(
             except Exception as exc:  # pragma: no cover - exact model parse failures vary
                 judgment = deterministic_judgment(candidate, triage, page_text=page_text)
                 judgment_error = f"{type(exc).__name__}: {exc}"
+                model_status = "model_exception"
         else:
             judgment = deterministic_judgment(
                 candidate, triage, page_text=page_text, mode="deterministic_disabled"
             )
 
+        qualification = prospect_qualification(judgment, triage, model_status=model_status)
         reviewed = CandidateReview(
             candidate=candidate,
             triage=triage,
@@ -728,9 +744,11 @@ async def _prospects_from_evidence(
             page_evidence_id=page_evidence_id,
             page_text=page_text,
             error=judgment_error,
+            qualification=qualification,
         )
         reviews.append(reviewed.to_dict())
-        if not is_accepted_prospect(judgment):
+        warnings.extend(qualification.qualification_warnings)
+        if not qualification.export_qualified:
             rejections.append(reviewed.to_dict())
             continue
         prospects.append(_prospect_record_from_judgment(reviewed).to_dict())
@@ -740,18 +758,26 @@ async def _prospects_from_evidence(
         reviews=reviews,
         rejections=rejections,
         extra_evidence=extra_evidence,
+        warnings=list(dict.fromkeys(warnings)),
     )
 
 
 def _candidate_reviews_from_evidence(
     evidence: Sequence[Mapping[str, Any]],
+    *,
+    directive: Mapping[str, str] | None = None,
 ) -> list[CandidateReview]:
     reviews: list[CandidateReview] = []
     for record in evidence:
         if str(record.get("source_type") or "snippet") != "snippet":
             continue
         candidate = ProspectCandidate.from_evidence(record)
-        reviews.append(CandidateReview(candidate=candidate, triage=triage_candidate(candidate)))
+        reviews.append(
+            CandidateReview(
+                candidate=candidate,
+                triage=triage_candidate(candidate, directive=directive),
+            )
+        )
     return reviews
 
 
@@ -844,6 +870,7 @@ def _prospect_record_from_judgment(review: CandidateReview) -> ProspectRecord:
     judgment = review.judgment
     if judgment is None:
         raise ValueError("accepted prospect review requires a judgment")
+    qualification = review.qualification
     candidate = review.candidate
     citation_id = review.page_evidence_id or candidate.evidence_id
     citation = ProspectCitation(
@@ -879,15 +906,205 @@ def _prospect_record_from_judgment(review: CandidateReview) -> ProspectRecord:
             "judgment_mode": judgment.mode,
             "fit_score": judgment.fit_score,
             "guardrail_flags": list(judgment.guardrail_flags),
+            **_qualification_metadata(qualification),
         },
     )
 
 
+def _qualification_metadata(
+    qualification: ProspectQualification | Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if qualification is None:
+        return {
+            "qualification_status": "",
+            "export_qualified": False,
+            "sufficiency_qualified": False,
+            "review_only": False,
+            "review_only_reason": "",
+            "qualification_reasons": [],
+            "qualification_warnings": [],
+            "fallback_metadata": {},
+            "model_judgment_status": "",
+        }
+    payload = (
+        qualification.to_dict()
+        if isinstance(qualification, ProspectQualification)
+        else dict(qualification)
+    )
+    fallback_metadata = dict(payload.get("fallback_metadata") or {})
+    return {
+        "qualification_status": str(payload.get("qualification_status") or ""),
+        "export_qualified": bool(payload.get("export_qualified", False)),
+        "sufficiency_qualified": bool(payload.get("sufficiency_qualified", False)),
+        "review_only": bool(payload.get("review_only", False)),
+        "review_only_reason": str(payload.get("review_only_reason") or ""),
+        "qualification_reasons": list(payload.get("qualification_reasons") or []),
+        "qualification_warnings": list(payload.get("qualification_warnings") or []),
+        "fallback_metadata": fallback_metadata,
+        "model_judgment_status": str(fallback_metadata.get("model_judgment_status") or ""),
+    }
+
+
 def _artifact_records(state: Mapping[str, Any]) -> list[dict[str, Any]]:
-    prospects = list(state.get("prospect_targets", []))
-    if prospects:
-        return prospects
+    prospect_rows = _prospect_artifact_records(state)
+    if prospect_rows:
+        return prospect_rows
     return list(state.get("evidence", []))
+
+
+def _prospect_artifact_records(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for target in list(state.get("prospect_targets", [])):
+        row = _artifact_row_from_target(target)
+        key = _artifact_row_key(row)
+        if key and key in seen:
+            continue
+        seen.add(key)
+        rows.append(row)
+
+    for review in [
+        *list(state.get("prospect_reviews", [])),
+        *list(state.get("prospect_rejections", [])),
+    ]:
+        row = _artifact_row_from_review(review)
+        if not row:
+            continue
+        key = _artifact_row_key(row)
+        if key and key in seen:
+            continue
+        seen.add(key)
+        rows.append(row)
+    return rows
+
+
+def _artifact_row_from_target(target: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = dict(target.get("metadata") or {})
+    citations = list(target.get("citations") or [])
+    citation = dict(citations[0]) if citations and isinstance(citations[0], Mapping) else {}
+    return _compact_artifact_row(
+        record_type="qualified",
+        organization=str(target.get("organization") or ""),
+        website=str(target.get("website") or ""),
+        summary=str(target.get("summary") or ""),
+        confidence=target.get("confidence", ""),
+        fit_score=metadata.get("fit_score", ""),
+        qualification_status=str(metadata.get("qualification_status") or "qualified"),
+        export_qualified=bool(metadata.get("export_qualified", True)),
+        sufficiency_qualified=bool(metadata.get("sufficiency_qualified", True)),
+        review_only=bool(metadata.get("review_only", False)),
+        review_only_reason=str(metadata.get("review_only_reason") or ""),
+        reject_reason="",
+        judgment_mode=str(metadata.get("judgment_mode") or ""),
+        model_judgment_status=str(metadata.get("model_judgment_status") or ""),
+        source_category=str(metadata.get("source_category") or ""),
+        page_intent=str(metadata.get("page_intent") or ""),
+        source_url=str(metadata.get("source_url") or target.get("website") or ""),
+        search_query=str(metadata.get("search_query") or ""),
+        guardrail_flags=list(metadata.get("guardrail_flags") or []),
+        evidence_id=str(citation.get("evidence_id") or ""),
+    )
+
+
+def _artifact_row_from_review(review: Mapping[str, Any]) -> dict[str, Any]:
+    candidate = dict(review.get("candidate") or {})
+    if not candidate:
+        return {}
+    triage = dict(review.get("triage") or {})
+    judgment = dict(review.get("judgment") or {})
+    qualification = _qualification_metadata(review.get("qualification"))
+    qualification_status = qualification["qualification_status"]
+    if not qualification_status:
+        qualification_status = "rejected" if triage.get("decision") == "reject" else "needs_review"
+    reject_reason = ""
+    if qualification_status == "rejected":
+        reject_reason = str(
+            judgment.get("reject_reason") or triage.get("reason") or review.get("error") or ""
+        )
+    fallback_metadata = dict(qualification.get("fallback_metadata") or {})
+    judgment_mode = str(judgment.get("mode") or fallback_metadata.get("judgment_mode") or "")
+    model_status = str(
+        fallback_metadata.get("model_judgment_status") or review.get("error") or ""
+    )
+    guardrail_flags = list(judgment.get("guardrail_flags") or triage.get("flags") or [])
+    return _compact_artifact_row(
+        record_type=qualification_status,
+        organization=str(judgment.get("organization") or candidate.get("organization_guess") or ""),
+        website=str(
+            judgment.get("canonical_website") or candidate.get("canonical_website") or ""
+        ),
+        summary=str(judgment.get("evidence_summary") or candidate.get("snippet") or ""),
+        confidence=judgment.get("confidence", ""),
+        fit_score=judgment.get("fit_score", ""),
+        qualification_status=qualification_status,
+        export_qualified=bool(qualification["export_qualified"]),
+        sufficiency_qualified=bool(qualification["sufficiency_qualified"]),
+        review_only=bool(qualification["review_only"]),
+        review_only_reason=str(qualification["review_only_reason"]),
+        reject_reason=reject_reason,
+        judgment_mode=judgment_mode,
+        model_judgment_status=model_status,
+        source_category=str(triage.get("source_category") or ""),
+        page_intent=str(triage.get("page_intent") or ""),
+        source_url=str(candidate.get("source_url") or candidate.get("url") or ""),
+        search_query=str(candidate.get("search_query") or ""),
+        guardrail_flags=guardrail_flags,
+        evidence_id=str(candidate.get("evidence_id") or ""),
+    )
+
+
+def _compact_artifact_row(**values: Any) -> dict[str, Any]:
+    return {
+        "record_type": values.get("record_type", ""),
+        "organization": values.get("organization", ""),
+        "website": values.get("website", ""),
+        "summary": _compact_artifact_summary(values.get("summary", "")),
+        "confidence": values.get("confidence", ""),
+        "fit_score": values.get("fit_score", ""),
+        "qualification_status": values.get("qualification_status", ""),
+        "export_qualified": values.get("export_qualified", False),
+        "sufficiency_qualified": values.get("sufficiency_qualified", False),
+        "review_only": values.get("review_only", False),
+        "review_only_reason": values.get("review_only_reason", ""),
+        "reject_reason": values.get("reject_reason", ""),
+        "judgment_mode": values.get("judgment_mode", ""),
+        "model_judgment_status": values.get("model_judgment_status", ""),
+        "source_category": values.get("source_category", ""),
+        "page_intent": values.get("page_intent", ""),
+        "source_url": values.get("source_url", ""),
+        "search_query": values.get("search_query", ""),
+        "guardrail_flags": values.get("guardrail_flags", []),
+        "evidence_id": values.get("evidence_id", ""),
+    }
+
+
+def _compact_artifact_summary(value: Any) -> str:
+    summary = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(summary) <= ARTIFACT_SUMMARY_MAX_CHARS:
+        return summary
+    return summary[: ARTIFACT_SUMMARY_MAX_CHARS - 3].rstrip() + "..."
+
+
+def _artifact_row_key(row: Mapping[str, Any]) -> str:
+    return str(row.get("website") or row.get("source_url") or row.get("evidence_id") or "")
+
+
+def _review_only_count(state: Mapping[str, Any]) -> int:
+    count = 0
+    for review in list(state.get("prospect_reviews", [])):
+        qualification = dict(review.get("qualification") or {})
+        if qualification.get("review_only"):
+            count += 1
+    return count
+
+
+def _sufficiency_qualified_count(prospects: Sequence[Mapping[str, Any]]) -> int:
+    count = 0
+    for prospect in prospects:
+        metadata = dict(prospect.get("metadata") or {})
+        if metadata.get("sufficiency_qualified", True):
+            count += 1
+    return count
 
 
 def _write_artifacts_if_requested(
@@ -904,6 +1121,13 @@ def _write_artifacts_if_requested(
             "query": state.get("query", ""),
             "geography_scope": state.get("geography_scope", {}),
             "geography_alias_suggestion": state.get("geography_alias_suggestion", {}),
+            "artifact_projection": "prospect_run_compact_v1",
+            "prospect_targets": list(state.get("prospect_targets", [])),
+            "prospect_reviews": list(state.get("prospect_reviews", [])),
+            "prospect_rejections": list(state.get("prospect_rejections", [])),
+            "warnings": list(state.get("warnings", [])),
+            "review_only_count": _review_only_count(state),
+            "export_qualified_count": len(list(state.get("prospect_targets", []))),
         },
     )
     state["artifact_paths"] = {
@@ -1033,6 +1257,10 @@ async def run_research(
             state["evidence"] = _dedupe_evidence(
                 [*list(state.get("evidence", [])), *extraction.extra_evidence]
             )
+        for warning in extraction.warnings:
+            if warning not in state["warnings"]:
+                state["warnings"].append(warning)
+                await record("warning", "warning_recorded", message=warning)
         state["findings"] = list(state["evidence"])
         state["prospect_targets"] = extraction.prospects
         state["prospect_reviews"] = extraction.reviews
@@ -1043,6 +1271,8 @@ async def run_research(
             "prospect_candidates_reviewed",
             accepted_count=len(extraction.prospects),
             rejected_count=len(extraction.rejections),
+            qualified_count=_sufficiency_qualified_count(extraction.prospects),
+            review_only_count=_review_only_count(state),
             llm_judgment_enabled=enable_llm_judgment,
         )
         state["iteration"] = next_iteration
@@ -1077,9 +1307,16 @@ async def run_research(
         state["warnings"].append("No search evidence was captured; prospect exports are empty.")
         await record("warning", "warning_recorded", message=state["warnings"][-1])
     elif not state["prospect_targets"]:
+        review_only_count = _review_only_count(state)
+        review_suffix = (
+            f" {review_only_count} candidate(s) were retained for review-only artifacts."
+            if review_only_count
+            else ""
+        )
         state["warnings"].append(
-            "Search evidence was captured, but no clear business prospects were extracted. "
-            "Add a target industry/niche and geography for stronger company discovery."
+            "Search evidence was captured, but no export-qualified business prospects were "
+            f"extracted.{review_suffix} Add a target industry/niche and geography for stronger "
+            "company discovery."
         )
         await record("warning", "warning_recorded", message=state["warnings"][-1])
     elif len(state["prospect_targets"]) < target_prospect_count:

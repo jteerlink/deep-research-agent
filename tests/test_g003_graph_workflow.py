@@ -4,6 +4,7 @@ import asyncio
 import json
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 from async_multi_search import SearchResult
@@ -23,6 +24,7 @@ from deep_research_agent.models import ModelRequest, ModelResponse
 from deep_research_agent.prospect_judgment import (
     ProspectCandidate,
     build_prospect_judge_prompt,
+    business_name_from_title,
     triage_candidate,
 )
 
@@ -57,6 +59,16 @@ class FakeProspectJudge:
             model="fake-model",
             content=json.dumps(structured),
             structured=structured,
+        )
+
+
+class MetadataOnlyProspectJudge:
+    async def invoke(self, request: ModelRequest) -> ModelResponse:
+        return ModelResponse(
+            provider=ModelProvider.OPENAI,
+            model="metadata-only-model",
+            content="",
+            structured={"node": request.node, "status": "metadata_only"},
         )
 
 
@@ -318,6 +330,95 @@ def test_run_research_records_normalized_geography_scope(tmp_path) -> None:
     assert state["evidence"][0]["query"] == "North Texas HVAC official websites"
 
 
+def test_metadata_only_prospect_judgment_is_review_only_and_continues_geography(
+    tmp_path,
+) -> None:
+    search_queries: list[str] = []
+    long_owned_snippet = "We provide AC repair in Fort Worth and Dallas. " + (
+        "Factory authorized dealer language should stay review-only. " * 30
+    )
+
+    async def search(query: str, _max_results: int):
+        search_queries.append(query)
+        if len(search_queries) == 1:
+            return [
+                SearchResult(
+                    "Texas Air Conditioning Contractors Association",
+                    "https://www.tacca.org/",
+                    "Professional trade association for HVAC contractors.",
+                    provider="tavily",
+                ),
+                SearchResult(
+                    "Samsung HVAC North America",
+                    "https://www.samsunghvac.com/",
+                    "Ductless and VRF systems from a manufacturer.",
+                    provider="tavily",
+                ),
+                SearchResult(
+                    "North TX Comfort HVAC",
+                    "https://northtxcomforthvac.com/",
+                    long_owned_snippet,
+                    provider="tavily",
+                ),
+            ]
+        return [
+            SearchResult(
+                "DFW Family HVAC",
+                "https://dfwfamilyhvac.com/",
+                "Locally owned HVAC company serving Dallas-Fort Worth homes.",
+                provider="tavily",
+            )
+        ]
+
+    artifact_dir = tmp_path / "artifacts"
+    state = asyncio.run(
+        run_research(
+            "industry: HVAC\ngeography: North Texas\ncriteria: lead reactivation",
+            thread_id="metadata-only-thread",
+            checkpoint_dir=tmp_path,
+            search=search,
+            model_client=MetadataOnlyProspectJudge(),
+            target_prospect_count=1,
+            max_iterations=2,
+            artifact_dir=artifact_dir,
+        )
+    )
+
+    assert search_queries == [
+        "North Texas HVAC official websites",
+        "Dallas-Fort Worth TX HVAC official websites",
+    ]
+    assert state["prospect_targets"] == []
+    assert "model_judgment_metadata_only" in state["warnings"]
+    qualifications = [
+        review["qualification"]
+        for review in state["prospect_reviews"]
+        if review.get("qualification")
+    ]
+    assert any(
+        qualification["qualification_status"] == "needs_review"
+        and qualification["export_qualified"] is False
+        and qualification["sufficiency_qualified"] is False
+        and qualification["review_only_reason"] == "model_judgment_metadata_only"
+        for qualification in qualifications
+    )
+
+    payload = json.loads(Path(state["artifact_paths"]["json"]).read_text())
+    assert payload["metadata"]["prospect_targets"] == []
+    assert payload["metadata"]["prospect_reviews"]
+    assert payload["metadata"]["prospect_rejections"]
+    assert payload["metadata"]["review_only_count"] >= 1
+    assert payload["records"]
+    assert all("qualification_status" in record for record in payload["records"])
+    assert all("title" not in record and "url" not in record for record in payload["records"])
+    assert any(record["qualification_status"] == "needs_review" for record in payload["records"])
+    assert all(len(record["summary"]) <= 600 for record in payload["records"])
+    assert any(
+        len((review["judgment"] or {}).get("evidence_summary", "")) > 600
+        for review in payload["metadata"]["prospect_reviews"]
+    )
+
+
 def test_run_research_surfaces_alias_suggestion_for_unknown_broad_region(tmp_path) -> None:
     state = asyncio.run(
         run_research(
@@ -401,11 +502,198 @@ def test_deterministic_triage_covers_broad_noise_categories() -> None:
             "snippet": "We provide AC repair in Fort Worth.",
         }
     )
+    association = ProspectCandidate.from_evidence(
+        {
+            "id": "ev_5",
+            "title": "Texas Air Conditioning Contractors Association",
+            "url": "https://www.tacca.org/",
+            "snippet": "Professional trade association and advocacy chapter.",
+        }
+    )
+    school = ProspectCandidate.from_evidence(
+        {
+            "id": "ev_6",
+            "title": "HVAC Technician Training",
+            "url": "https://www.techzonehvacr.com/",
+            "snippet": "Technician training classes and certification program.",
+        }
+    )
+    regulator = ProspectCandidate.from_evidence(
+        {
+            "id": "ev_7",
+            "title": "Texas Department of Licensing HVAC",
+            "url": "https://www.tdlr.texas.gov/acr/",
+            "snippet": "Verify a license or renew a license with the state agency.",
+        }
+    )
+    manufacturer = ProspectCandidate.from_evidence(
+        {
+            "id": "ev_8",
+            "title": "Samsung HVAC North America",
+            "url": "https://www.samsunghvac.com/",
+            "snippet": "Ductless and VRF systems from a manufacturer.",
+        }
+    )
+    national_brand = ProspectCandidate.from_evidence(
+        {
+            "id": "ev_9",
+            "title": "One Hour Heating & Air Conditioning",
+            "url": "https://www.onehourheatandair.com/locations/",
+            "snippet": "Find a location from a national franchise brand.",
+        }
+    )
 
     assert triage_candidate(zoominfo).decision == "reject"
     assert triage_candidate(listicle).decision == "reject"
     assert triage_candidate(contact).decision == "fetch_then_judge"
     assert triage_candidate(homepage).decision == "judge"
+    assert triage_candidate(association).source_category == "association"
+    assert triage_candidate(association).decision == "reject"
+    assert triage_candidate(school).source_category == "education"
+    assert triage_candidate(school).decision == "reject"
+    assert triage_candidate(regulator).source_category == "government"
+    assert triage_candidate(regulator).decision == "reject"
+    assert triage_candidate(manufacturer).source_category == "manufacturer"
+    assert triage_candidate(manufacturer).decision == "reject"
+    assert triage_candidate(national_brand).source_category == "national_brand"
+    assert triage_candidate(national_brand).decision == "reject"
+
+
+def test_owned_entity_noise_routes_to_review_instead_of_rejecting() -> None:
+    local_dealer = ProspectCandidate.from_evidence(
+        {
+            "id": "ev_1",
+            "title": "North Texas HVAC",
+            "url": "https://northtxhvac.com/",
+            "snippet": (
+                "We provide AC repair in Fort Worth and are an authorized dealer "
+                "for major manufacturer brands."
+            ),
+        }
+    )
+    local_training_word = ProspectCandidate.from_evidence(
+        {
+            "id": "ev_2",
+            "title": "Titan Air Solutions",
+            "url": "https://titanairdfw.com/",
+            "snippet": "Our team receives technician training and provides HVAC service in DFW.",
+        }
+    )
+
+    dealer_triage = triage_candidate(local_dealer)
+    training_triage = triage_candidate(local_training_word)
+
+    assert dealer_triage.source_category == "owned_or_unknown"
+    assert "manufacturer" in dealer_triage.flags
+    assert dealer_triage.decision == "fetch_then_judge"
+    assert training_triage.source_category == "owned_or_unknown"
+    assert "education" in training_triage.flags
+    assert training_triage.decision == "fetch_then_judge"
+
+
+def test_prospecting_vendor_noise_is_rejected() -> None:
+    lead_vendor = ProspectCandidate.from_evidence(
+        {
+            "id": "ev_1",
+            "title": "D7 Lead Finder",
+            "url": "https://d7leadfinder.com/",
+            "snippet": "Find contractors and generate HVAC leads with lead finder software.",
+        }
+    )
+
+    triage = triage_candidate(lead_vendor)
+
+    assert "vendor_noise" in triage.flags
+    assert triage.decision == "reject"
+
+
+def test_requested_entity_categories_are_not_hard_rejected_by_noise_filters() -> None:
+    manufacturer = ProspectCandidate.from_evidence(
+        {
+            "id": "ev_1",
+            "title": "Samsung HVAC North America",
+            "url": "https://www.samsunghvac.com/",
+            "snippet": "Ductless and VRF systems from a manufacturer.",
+        }
+    )
+    national_brand = ProspectCandidate.from_evidence(
+        {
+            "id": "ev_2",
+            "title": "One Hour Heating & Air Conditioning",
+            "url": "https://www.onehourheatandair.com/locations/",
+            "snippet": "Find a location from a national franchise brand.",
+        }
+    )
+
+    assert (
+        triage_candidate(manufacturer, directive={"industry": "HVAC manufacturers"}).decision
+        == "judge"
+    )
+    assert triage_candidate(
+        national_brand, directive={"industry": "HVAC franchises"}
+    ).decision == "fetch_then_judge"
+
+
+def test_business_name_hygiene_uses_domain_when_title_is_only_geography() -> None:
+    assert (
+        business_name_from_title("Fort Worth, TX", "northtxhvac.com")
+        == "North Texas HVAC"
+    )
+    assert (
+        business_name_from_title("Northtxhvac", "northtxhvac.com")
+        == "North Texas HVAC"
+    )
+    assert (
+        business_name_from_title(
+            "Contact Us for Emergency HVAC Service in Fort Worth, TX",
+            "northtxcomforthvac.com",
+        )
+        == "North Texas Comfort HVAC"
+    )
+    assert business_name_from_title("HVAC", "primarytx.com") == "Primary TX"
+    assert business_name_from_title("United States", "excelgeothermal.com") == (
+        "Excel Geothermal"
+    )
+    assert business_name_from_title("Dallas-fort Worth", "tempoair.com") == "Tempo Air"
+    assert business_name_from_title("24/7 Emergency", "mycoolingcompany.com") == (
+        "My Cooling Company"
+    )
+    assert business_name_from_title("24/7 Emergency", "kahnmechanical.com") == (
+        "Kahn Mechanical"
+    )
+    assert business_name_from_title("Repair & Installation", "txairmechanics.com") == (
+        "TX Air Mechanics"
+    )
+    assert business_name_from_title(
+        "Texasexpresshvac AC Repair DFW",
+        "texasexpresshvac.com",
+    ) == "Texas Express HVAC"
+    assert business_name_from_title(
+        "Reliable HVAC Contractor In Dallas, Texas & Dallas County",
+        "reynoldsheatnair.com",
+    ) == "Reynolds Heat N Air"
+    assert (
+        business_name_from_title("Geothermal Installation", "excelgeothermal.com")
+        == "Excel Geothermal"
+    )
+    assert (
+        business_name_from_title("Dfw's HVAC Pros", "mycoolingcompany.com")
+        == "My Cooling Company"
+    )
+    assert (
+        business_name_from_title(
+            "Top Rated HVAC Company in Dallas, TX",
+            "proactiveairconditioning.com",
+        )
+        == "Proactive Air Conditioning"
+    )
+    assert (
+        business_name_from_title(
+            "Trane\u00ae | Harold James, Inc | Fort Worth, TX",
+            "haroldjames.com",
+        )
+        == "Harold James, Inc"
+    )
 
 
 def test_run_research_exports_only_llm_accepted_owned_businesses(tmp_path) -> None:
@@ -445,6 +733,11 @@ def test_run_research_exports_only_llm_accepted_owned_businesses(tmp_path) -> No
 
     assert [target["organization"] for target in state["prospect_targets"]] == ["Actual HVAC"]
     assert state["prospect_targets"][0]["website"] == "https://actualhvac.com"
+    metadata = state["prospect_targets"][0]["metadata"]
+    assert metadata["qualification_status"] == "qualified"
+    assert metadata["export_qualified"] is True
+    assert metadata["sufficiency_qualified"] is True
+    assert metadata["review_only"] is False
     assert any(
         rejection["triage"]["source_category"] == "directory"
         for rejection in state["prospect_rejections"]
