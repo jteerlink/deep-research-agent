@@ -14,7 +14,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, Literal, TypeAlias, TypeVar, cast
 from urllib.parse import urlparse
 
 TieredWorkflowStatus = Literal["completed", "needs_review"]
@@ -46,7 +46,7 @@ _REQUIRED_DIRECTIVE_FIELDS = (
 )
 
 T = TypeVar("T")
-MaybeAwaitable = T | Awaitable[T]
+MaybeAwaitable: TypeAlias = T | Awaitable[T]
 CompanyDiscoveryFn = Callable[[Mapping[str, Any]], MaybeAwaitable[Sequence[Mapping[str, Any]]]]
 ContactDiscoveryFn = Callable[
     [Mapping[str, Any], Mapping[str, Any]], MaybeAwaitable[Sequence[Mapping[str, Any]]]
@@ -167,7 +167,9 @@ class TieredResearchWorkflow:
         )
 
         events.append(_event("company_discovery", "started"))
-        raw_companies = list(await _await_result(self.company_discovery(normalized_directive)))
+        raw_companies: list[Mapping[str, Any]] = list(
+            await _await_result(self.company_discovery(normalized_directive))
+        )
         events.append(_event("company_discovery", "completed", candidate_count=len(raw_companies)))
 
         events.append(_event("company_qualification", "started"))
@@ -191,7 +193,7 @@ class TieredResearchWorkflow:
         contacts: list[dict[str, Any]] = []
         events.append(_event("contact_discovery", "started"))
         for company in companies:
-            raw_contacts = list(
+            raw_contacts: list[Mapping[str, Any]] = list(
                 await _await_result(self.contact_discovery(normalized_directive, company))
             )
             company_contacts = normalize_contacts(
@@ -212,7 +214,7 @@ class TieredResearchWorkflow:
         companies_by_id = {str(company["company_id"]): company for company in companies}
         for contact in contacts:
             company = companies_by_id[str(contact["company_id"])]
-            raw_signals = list(
+            raw_signals: list[Mapping[str, Any]] = list(
                 await _await_result(
                     self.personalization_research(normalized_directive, company, contact)
                 )
@@ -247,7 +249,8 @@ class TieredResearchWorkflow:
         )
         if self.artifact_writer is not None:
             events.append(_event("artifact_writer", "started"))
-            artifact_paths = dict(await _await_result(self.artifact_writer(snapshot)) or {})
+            artifact_result = await _await_result(self.artifact_writer(snapshot))
+            artifact_paths = dict(artifact_result or {})
             events.append(
                 _event("artifact_writer", "completed", artifact_count=len(artifact_paths))
             )
