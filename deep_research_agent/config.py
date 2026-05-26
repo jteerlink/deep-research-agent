@@ -25,7 +25,7 @@ class OllamaNativeConfig:
     """
 
     base_url: str = "https://ollama.com/api"
-    model: str = "deepseek-v4-pro:cloud"
+    model: str = "gpt-oss:120b"
     api_key: str = ""
 
 
@@ -172,7 +172,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
             model=_get(
                 source,
                 "OLLAMA_NATIVE_MODEL",
-                _get(source, "DRA_OLLAMA_MODEL", "deepseek-v4-pro:cloud"),
+                _get(source, "DRA_OLLAMA_MODEL", "gpt-oss:120b"),
             ),
             api_key=_get(source, "OLLAMA_API_KEY", ""),
         ),

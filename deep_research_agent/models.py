@@ -9,7 +9,9 @@ future live transports can replace behind the same interface.
 from __future__ import annotations
 
 import json
+import os
 import re
+import ssl
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -427,7 +429,10 @@ class ConfiguredModelClient:
             "temperature": 0,
             "response_format": {"type": "json_object"},
         }
-        async with httpx.AsyncClient(timeout=self.config.search.timeout_seconds) as client:
+        async with httpx.AsyncClient(
+            timeout=self.config.search.timeout_seconds,
+            verify=_httpx_verify_value(),
+        ) as client:
             response = await client.post(
                 f"{base_url}/chat/completions", headers=headers, json=payload
             )
@@ -447,7 +452,10 @@ class ConfiguredModelClient:
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         payload = {"model": model, "prompt": request.prompt, "stream": False, "format": "json"}
-        async with httpx.AsyncClient(timeout=self.config.search.timeout_seconds) as client:
+        async with httpx.AsyncClient(
+            timeout=self.config.search.timeout_seconds,
+            verify=_httpx_verify_value(),
+        ) as client:
             response = await client.post(endpoint, headers=headers, json=payload)
             response.raise_for_status()
         return str(response.json().get("response", ""))
@@ -466,6 +474,14 @@ def _parse_json_content(content: str) -> dict[str, Any]:
 
 def _is_local_host(host: str) -> bool:
     return host in {"", "localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+def _httpx_verify_value() -> bool | ssl.SSLContext:
+    for key in ("DEEP_RESEARCH_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return ssl.create_default_context(cafile=value)
+    return True
 
 
 def build_model_client(config: AppConfig | None = None) -> ConfiguredModelClient:

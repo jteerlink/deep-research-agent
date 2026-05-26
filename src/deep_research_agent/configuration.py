@@ -28,7 +28,7 @@ class OllamaNativeConfig:
     """Configuration for Ollama's native `/api` transport."""
 
     base_url: str = "https://ollama.com/api"
-    model: str = "deepseek-v4-pro:cloud"
+    model: str = "gpt-oss:120b"
     api_key: str = ""
 
 
@@ -153,7 +153,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AgentConfig:
         fallback_order=_fallback_order(source),
         ollama_native=OllamaNativeConfig(
             base_url=_get(source, "OLLAMA_NATIVE_BASE_URL", "https://ollama.com/api"),
-            model=_get(source, "OLLAMA_NATIVE_MODEL", "deepseek-v4-pro:cloud"),
+            model=_get(source, "OLLAMA_NATIVE_MODEL", "gpt-oss:120b"),
             api_key=_get(source, "OLLAMA_API_KEY", ""),
         ),
         ollama_openai_compatible=OllamaOpenAICompatibleConfig(

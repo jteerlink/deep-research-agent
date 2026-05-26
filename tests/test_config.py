@@ -11,7 +11,7 @@ def test_default_config_is_ollama_native() -> None:
     assert config.primary_provider is ModelProvider.OLLAMA_NATIVE
     assert config.ollama_native.base_url == "https://ollama.com/api"
     assert config.ollama_openai.base_url == ""
-    assert config.primary_model == "deepseek-v4-pro:cloud"
+    assert config.primary_model == "gpt-oss:120b"
 
 
 def test_openai_and_codex_fallbacks_are_distinct() -> None:

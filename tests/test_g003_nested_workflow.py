@@ -140,12 +140,12 @@ def test_model_client_does_not_treat_local_ollama_as_available() -> None:
         primary_provider=ModelProvider.OLLAMA_NATIVE,
         ollama_native=OllamaNativeConfig(
             base_url="http://localhost:11434/api",
-            model="deepseek-v4-pro:cloud",
+            model="gpt-oss:120b",
             api_key="local-key",
         ),
         ollama_openai=OllamaOpenAIConfig(
             base_url="http://localhost:11434/v1",
-            model="deepseek-v4-pro:cloud",
+            model="gpt-oss:120b",
             api_key="ollama",
         ),
         openai=OpenAIConfig(api_key="", model="openai-test"),
@@ -200,7 +200,7 @@ def test_model_preflight_rejects_local_ollama_even_with_key() -> None:
         primary_provider=ModelProvider.OLLAMA_NATIVE,
         ollama_native=OllamaNativeConfig(
             base_url="http://localhost:11434/api",
-            model="deepseek-v4-pro:cloud",
+            model="gpt-oss:120b",
             api_key="local-key",
         ),
         ollama_openai=OllamaOpenAIConfig(),
@@ -293,7 +293,7 @@ def test_configured_ollama_live_judgment_can_export_qualified_prospect(monkeypat
         request: ModelRequest,
     ) -> str:
         assert provider is ModelProvider.OLLAMA_NATIVE
-        assert model == "deepseek-v4-pro:cloud"
+        assert model == "gpt-oss:120b"
         payload = json.loads(request.prompt)
         candidate = payload["candidate"]
         return json.dumps(
@@ -346,6 +346,51 @@ def test_configured_ollama_live_judgment_can_export_qualified_prospect(monkeypat
     assert state["model_preflight"]["live_model_available"] is True
     assert state["prospect_targets"][0]["organization"] == "Actual HVAC"
     assert state["prospect_targets"][0]["metadata"]["export_qualified"] is True
+
+
+def test_ollama_model_transport_uses_configured_ca_bundle(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    verify_context = object()
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"response": '{"ok": true}'}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/tmp/zscaler.pem")
+    monkeypatch.setattr(
+        "deep_research_agent.models.ssl.create_default_context",
+        lambda *, cafile: verify_context,
+    )
+    monkeypatch.setattr("deep_research_agent.models.httpx.AsyncClient", FakeAsyncClient)
+    config = AppConfig(
+        primary_provider=ModelProvider.OLLAMA_NATIVE,
+        ollama_native=OllamaNativeConfig(api_key="ollama-key"),
+        ollama_openai=OllamaOpenAIConfig(),
+        openai=OpenAIConfig(api_key="", model="openai-test"),
+        codex=CodexConfig(api_key="", model="codex-test"),
+        search=SearchConfig(),
+    )
+
+    response = asyncio.run(build_model_client(config).live_smoke())
+
+    assert response.structured == {"ok": True}
+    assert captured["verify"] is verify_context
 
 
 def test_thread_id_resume_approves_review_interrupt(tmp_path) -> None:

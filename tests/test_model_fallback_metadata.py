@@ -19,7 +19,7 @@ def test_fallback_event_record_captures_serializable_error_metadata() -> None:
 
     event = FallbackEvent.record(
         provider=ModelProvider.OLLAMA_NATIVE,
-        model="deepseek-v4-pro:cloud",
+        model="gpt-oss:120b",
         trigger="transport_error",
         node="supervisor",
         retry_count=2,
@@ -27,7 +27,7 @@ def test_fallback_event_record_captures_serializable_error_metadata() -> None:
     )
 
     assert event.provider is ModelProvider.OLLAMA_NATIVE
-    assert event.model == "deepseek-v4-pro:cloud"
+    assert event.model == "gpt-oss:120b"
     assert event.trigger == "transport_error"
     assert event.node == "supervisor"
     assert event.retry_count == 2
