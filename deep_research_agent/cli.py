@@ -14,6 +14,9 @@ from async_multi_search import SearchResult
 
 from .config import load_config
 from .graph import (
+    DEFAULT_MAX_RESEARCH_ITERATIONS,
+    DEFAULT_TARGET_PROSPECT_COUNT,
+    derive_prospect_run_budget,
     inspect_research_thread,
     inspect_thread,
     resume_research,
@@ -108,19 +111,19 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--max-iterations",
         type=int,
-        default=3,
-        help="Maximum researcher iterations before sufficiency routing.",
+        default=None,
+        help="Override derived researcher iterations before sufficiency routing.",
     )
     run_parser.add_argument(
         "--max-results",
         type=int,
-        default=5,
-        help="Maximum search results requested per researcher iteration.",
+        default=None,
+        help="Override derived search results requested per researcher iteration.",
     )
     run_parser.add_argument(
         "--target-prospect-count",
         type=int,
-        default=10,
+        default=DEFAULT_TARGET_PROSPECT_COUNT,
         help="Potential business targets to collect before sufficiency routing.",
     )
     run_parser.add_argument(
@@ -266,6 +269,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "run":
         try:
+            budget = derive_prospect_run_budget(
+                args.target_prospect_count,
+                max_iterations=args.max_iterations,
+                max_results=args.max_results,
+            )
             if args.json:
                 if args.artifact_dir:
                     state = asyncio.run(
@@ -274,9 +282,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                             thread_id=args.thread_id,
                             checkpoint_dir=args.checkpoint_dir,
                             require_review=not args.approve,
-                            max_iterations=args.max_iterations,
-                            max_results=args.max_results,
-                            target_prospect_count=args.target_prospect_count,
+                            max_iterations=budget.max_iterations,
+                            max_results=budget.max_results,
+                            target_prospect_count=budget.target_prospect_count,
+                            model_timeout_seconds=budget.model_timeout_seconds,
                             enable_llm_judgment=not args.no_llm_judgment,
                             require_live_model=args.require_live_model,
                             review_approved=args.approve,
@@ -292,9 +301,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                             thread_id=args.thread_id,
                             checkpoint_dir=args.checkpoint_dir,
                             require_review=not args.approve,
-                            max_iterations=args.max_iterations,
-                            max_results=args.max_results,
-                            target_prospect_count=args.target_prospect_count,
+                            max_iterations=budget.max_iterations,
+                            max_results=budget.max_results,
+                            target_prospect_count=budget.target_prospect_count,
+                            model_timeout_seconds=budget.model_timeout_seconds,
                             enable_llm_judgment=not args.no_llm_judgment,
                             require_live_model=True,
                             review_approved=args.approve,
@@ -306,7 +316,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.query,
                     thread_id=args.thread_id,
                     checkpoint_dir=args.checkpoint_dir,
-                    max_iterations=args.max_iterations,
+                    max_iterations=args.max_iterations or DEFAULT_MAX_RESEARCH_ITERATIONS,
                     approve=args.approve,
                 )
                 _print_json(result)
@@ -322,9 +332,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         if args.mock_result
                         else None,
                         require_review=args.require_review,
-                        max_iterations=args.max_iterations,
-                        max_results=args.max_results,
-                        target_prospect_count=args.target_prospect_count,
+                        max_iterations=budget.max_iterations,
+                        max_results=budget.max_results,
+                        target_prospect_count=budget.target_prospect_count,
+                        model_timeout_seconds=budget.model_timeout_seconds,
                         enable_llm_judgment=not args.no_llm_judgment,
                         require_live_model=args.require_live_model,
                         review_approved=args.approve,
@@ -338,7 +349,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.query,
                 thread_id=args.thread_id,
                 checkpoint_dir=args.checkpoint_dir,
-                max_results=args.max_results,
+                max_iterations=budget.max_iterations,
+                max_results=budget.max_results,
+                target_prospect_count=budget.target_prospect_count,
                 require_live_model=args.require_live_model,
                 artifact_dir=args.artifact_dir,
             )

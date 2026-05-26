@@ -12,9 +12,14 @@ from deep_research_agent.config import ModelProvider
 from deep_research_agent.graph import (
     CHECKPOINT_SCHEMA_VERSION,
     GRAPH_TOPOLOGY,
+    MAX_MODEL_TIMEOUT_SECONDS,
+    MAX_RAW_SEARCH_RESULTS_PER_RUN,
+    MAX_SEARCH_ITERATIONS,
+    MAX_TARGET_PROSPECT_COUNT,
     LocalCheckpointStore,
     build_graph,
     build_prospect_search_queries,
+    derive_prospect_run_budget,
     inspect_thread,
     resume_thread,
     run_query,
@@ -73,6 +78,42 @@ class MetadataOnlyProspectJudge:
             model="metadata-only-model",
             content="",
             structured={"node": request.node, "status": "metadata_only"},
+        )
+
+
+class CountingProspectJudge:
+    def __init__(self) -> None:
+        self.prospect_judgment_calls = 0
+
+    async def invoke(self, request: ModelRequest) -> ModelResponse:
+        if request.response_schema is None:
+            return ModelResponse(
+                provider=ModelProvider.OPENAI,
+                model="fake-model",
+                content="",
+                structured={"node": request.node, "status": "metadata_only"},
+            )
+        self.prospect_judgment_calls += 1
+        payload = json.loads(request.prompt)
+        candidate = payload["candidate"]
+        structured: dict[str, Any] = {
+            "accepted": True,
+            "organization": candidate["organization_guess"],
+            "canonical_website": candidate["canonical_website"],
+            "fit_score": 0.82,
+            "confidence": 0.8,
+            "reject_reason": "",
+            "fit_rationale": "Owned service business in the target market.",
+            "evidence_summary": candidate["snippet"] or candidate["page_text"],
+            "personalized_angles": [],
+            "decision_maker_leads": [],
+            "guardrail_flags": [],
+        }
+        return ModelResponse(
+            provider=ModelProvider.OPENAI,
+            model="fake-model",
+            content=json.dumps(structured),
+            structured=structured,
         )
 
 
@@ -222,6 +263,113 @@ def test_run_research_passes_max_results_and_emits_progress_events(tmp_path) -> 
         "sufficiency_routed",
         "review_interrupt",
     ]
+
+
+def test_prospect_run_budget_derives_guarded_knobs_from_target_count() -> None:
+    budget = derive_prospect_run_budget(25)
+
+    assert budget.target_prospect_count == 25
+    assert budget.max_iterations == 5
+    assert budget.max_results == 20
+    assert budget.estimated_raw_search_results == 100
+    assert budget.max_model_judgments == 75
+    assert budget.search_timeout_seconds == 14
+    assert budget.model_timeout_seconds == 70
+
+    guarded = derive_prospect_run_budget(
+        999,
+        max_iterations=99,
+        max_results=99,
+        search_timeout_seconds=999,
+        model_timeout_seconds=999,
+    )
+
+    assert guarded.requested_target_prospect_count == 999
+    assert guarded.target_prospect_count == MAX_TARGET_PROSPECT_COUNT
+    assert guarded.max_iterations == MAX_SEARCH_ITERATIONS
+    assert guarded.max_results == MAX_RAW_SEARCH_RESULTS_PER_RUN // MAX_SEARCH_ITERATIONS
+    assert guarded.estimated_raw_search_results == MAX_RAW_SEARCH_RESULTS_PER_RUN
+    assert guarded.max_model_judgments == 150
+    assert guarded.search_timeout_seconds == 30
+    assert guarded.model_timeout_seconds == MAX_MODEL_TIMEOUT_SECONDS
+    assert any("target_prospect_count capped" in warning for warning in guarded.warnings)
+    assert any("raw search budget capped" in warning for warning in guarded.warnings)
+
+
+def test_run_research_uses_derived_budget_when_search_knobs_are_not_supplied(tmp_path) -> None:
+    requested_max_results: list[int] = []
+
+    async def search(_query: str, max_results: int):
+        requested_max_results.append(max_results)
+        return [
+            SearchResult(
+                f"Acme {index}",
+                f"https://acme-{index}.com",
+                "We provide local service with customer reactivation opportunity.",
+                provider="tavily",
+            )
+            for index in range(10)
+        ]
+
+    state = asyncio.run(
+        run_research(
+            "industry: dental practices\ngeography: Dallas\ncriteria: patient reactivation",
+            thread_id="budget-thread",
+            checkpoint_dir=tmp_path,
+            search=search,
+            target_prospect_count=10,
+            enable_llm_judgment=False,
+        )
+    )
+
+    assert requested_max_results == [14]
+    assert state["prospect_run_budget"]["max_iterations"] == 3
+    assert state["prospect_run_budget"]["max_results"] == 14
+    assert state["raw_search_max_results"] == 14
+
+
+def test_run_research_reuses_cached_domain_judgments_across_iterations(tmp_path) -> None:
+    search_queries: list[str] = []
+    judge = CountingProspectJudge()
+
+    async def search(query: str, _max_results: int):
+        search_queries.append(query)
+        if len(search_queries) == 1:
+            return [
+                SearchResult(
+                    "Acme Plumbing",
+                    "https://acmeplumbing.com/",
+                    "We provide plumbing service in Dallas.",
+                    provider="tavily",
+                )
+            ]
+        return [
+            SearchResult(
+                "Beta Plumbing",
+                "https://betaplumbing.com/",
+                "We provide plumbing service in Dallas.",
+                provider="tavily",
+            )
+        ]
+
+    state = asyncio.run(
+        run_research(
+            "industry: plumbers\ngeography: Dallas\ncriteria: customer winback",
+            thread_id="judgment-cache-thread",
+            checkpoint_dir=tmp_path,
+            search=search,
+            model_client=judge,
+            target_prospect_count=2,
+            max_iterations=2,
+        )
+    )
+
+    assert [target["organization"] for target in state["prospect_targets"]] == [
+        "Acme Plumbing",
+        "Beta Plumbing",
+    ]
+    assert judge.prospect_judgment_calls == 2
+    assert state["model_judgment_count"] == 2
 
 
 def test_run_research_accumulates_business_targets_before_sufficiency(tmp_path) -> None:

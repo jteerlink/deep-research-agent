@@ -13,7 +13,7 @@ import json
 import os
 import re
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping, Sequence
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
@@ -52,6 +52,13 @@ ProgressCallback = Callable[[dict[str, Any]], object]
 
 DEFAULT_MAX_RESEARCH_ITERATIONS = 3
 DEFAULT_TARGET_PROSPECT_COUNT = 10
+MAX_TARGET_PROSPECT_COUNT = 100
+MAX_SEARCH_ITERATIONS = 10
+MAX_SEARCH_RESULTS_PER_ITERATION = 50
+MAX_RAW_SEARCH_RESULTS_PER_RUN = 300
+MAX_MODEL_JUDGMENTS_PER_RUN = 150
+MAX_SEARCH_TIMEOUT_SECONDS = 30
+MAX_MODEL_TIMEOUT_SECONDS = 120
 CHECKPOINT_SCHEMA_VERSION = "g003.local_checkpoint.v1"
 GRAPH_TOPOLOGY = {
     "main": ("supervisor", "review"),
@@ -92,7 +99,11 @@ class ResearchState(TypedDict, total=False):
     prospect_rejections: list[dict[str, Any]]
     geography_scope: dict[str, Any]
     geography_alias_suggestion: dict[str, Any]
+    requested_target_prospect_count: int
     target_prospect_count: int
+    prospect_run_budget: dict[str, Any]
+    model_judgment_count: int
+    model_judgment_budget_exhausted_count: int
     llm_judgment_enabled: bool
     artifact_paths: dict[str, str]
     warnings: list[str]
@@ -109,6 +120,29 @@ class ProspectExtractionResult:
     extra_evidence: list[dict[str, Any]]
     warnings: list[str]
     model_fallback_events: list[dict[str, Any]]
+    model_judgment_count: int = 0
+    model_judgment_budget_exhausted_count: int = 0
+
+
+@dataclass(frozen=True)
+class ProspectRunBudget:
+    """Bounded execution knobs derived from the requested prospect count."""
+
+    requested_target_prospect_count: int
+    target_prospect_count: int
+    max_iterations: int
+    max_results: int
+    raw_search_max_results: int
+    search_timeout_seconds: int
+    model_timeout_seconds: int
+    max_model_judgments: int
+    estimated_raw_search_results: int
+    warnings: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["warnings"] = list(self.warnings)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -244,8 +278,8 @@ class LocalResearchWorkflow:
         thread_id: str | None = None,
         search: SearchFn | None = None,
         require_review: bool = False,
-        max_iterations: int = DEFAULT_MAX_RESEARCH_ITERATIONS,
-        max_results: int = 5,
+        max_iterations: int | None = None,
+        max_results: int | None = None,
         target_prospect_count: int = DEFAULT_TARGET_PROSPECT_COUNT,
         require_live_model: bool = False,
         progress_callback: ProgressCallback | None = None,
@@ -291,6 +325,9 @@ class LocalResearchWorkflow:
             max_results=_coerce_int(
                 max_results if max_results is not None else state.get("max_results"), 5
             ),
+            target_prospect_count=int(
+                state.get("target_prospect_count", DEFAULT_TARGET_PROSPECT_COUNT) or 1
+            ),
             require_live_model=require_live_model,
             progress_callback=progress_callback,
             review_approved=True,
@@ -312,6 +349,138 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, ModelProvider):
         return value.value
     return value
+
+
+def derive_prospect_run_budget(
+    target_prospect_count: int,
+    *,
+    max_iterations: int | None = None,
+    max_results: int | None = None,
+    search_timeout_seconds: int | None = None,
+    model_timeout_seconds: int | None = None,
+) -> ProspectRunBudget:
+    """Return bounded runtime knobs for a desired final prospect count."""
+
+    warnings: list[str] = []
+    requested_target = _positive_int(
+        target_prospect_count,
+        DEFAULT_TARGET_PROSPECT_COUNT,
+        label="target_prospect_count",
+        warnings=warnings,
+    )
+    target = min(requested_target, MAX_TARGET_PROSPECT_COUNT)
+    if target != requested_target:
+        warnings.append(
+            f"target_prospect_count capped at {MAX_TARGET_PROSPECT_COUNT} by run guardrail"
+        )
+
+    derived_iterations = min(MAX_SEARCH_ITERATIONS, max(1, _ceil_div(target, 8) + 1))
+    iterations = _bounded_budget_value(
+        max_iterations,
+        default=derived_iterations,
+        minimum=1,
+        maximum=MAX_SEARCH_ITERATIONS,
+        label="max_iterations",
+        warnings=warnings,
+    )
+
+    desired_raw_pool = min(MAX_RAW_SEARCH_RESULTS_PER_RUN, max(target * 4, target + 10))
+    derived_results = min(
+        MAX_SEARCH_RESULTS_PER_ITERATION,
+        max(5, _ceil_div(desired_raw_pool, iterations)),
+    )
+    results = _bounded_budget_value(
+        max_results,
+        default=derived_results,
+        minimum=1,
+        maximum=MAX_SEARCH_RESULTS_PER_ITERATION,
+        label="max_results",
+        warnings=warnings,
+    )
+    if results * iterations > MAX_RAW_SEARCH_RESULTS_PER_RUN:
+        capped_results = max(1, MAX_RAW_SEARCH_RESULTS_PER_RUN // iterations)
+        if capped_results < results:
+            results = capped_results
+            warnings.append(
+                f"raw search budget capped at {MAX_RAW_SEARCH_RESULTS_PER_RUN} results per run"
+            )
+
+    search_timeout = _bounded_budget_value(
+        search_timeout_seconds,
+        default=min(
+            MAX_SEARCH_TIMEOUT_SECONDS,
+            10 + (_ceil_div(max(target - 10, 0), 10) * 2),
+        ),
+        minimum=1,
+        maximum=MAX_SEARCH_TIMEOUT_SECONDS,
+        label="search_timeout_seconds",
+        warnings=warnings,
+    )
+    model_timeout = _bounded_budget_value(
+        model_timeout_seconds,
+        default=min(
+            MAX_MODEL_TIMEOUT_SECONDS,
+            60 + (_ceil_div(max(target - 10, 0), 10) * 5),
+        ),
+        minimum=1,
+        maximum=MAX_MODEL_TIMEOUT_SECONDS,
+        label="model_timeout_seconds",
+        warnings=warnings,
+    )
+    max_model_judgments = min(
+        MAX_MODEL_JUDGMENTS_PER_RUN,
+        max(10, target * 3),
+        MAX_RAW_SEARCH_RESULTS_PER_RUN,
+    )
+    return ProspectRunBudget(
+        requested_target_prospect_count=requested_target,
+        target_prospect_count=target,
+        max_iterations=iterations,
+        max_results=results,
+        raw_search_max_results=results,
+        search_timeout_seconds=search_timeout,
+        model_timeout_seconds=model_timeout,
+        max_model_judgments=max_model_judgments,
+        estimated_raw_search_results=iterations * results,
+        warnings=tuple(dict.fromkeys(warnings)),
+    )
+
+
+def _ceil_div(numerator: int, denominator: int) -> int:
+    return (numerator + denominator - 1) // denominator
+
+
+def _positive_int(value: Any, default: int, *, label: str, warnings: list[str]) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        warnings.append(f"{label} defaulted to {default} because it was not an integer")
+        return default
+    if number < 1:
+        warnings.append(f"{label} raised to 1 because run budgets require positive values")
+        return 1
+    return number
+
+
+def _bounded_budget_value(
+    value: int | None,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+    label: str,
+    warnings: list[str],
+) -> int:
+    if value is None:
+        return default
+    number = _positive_int(value, default, label=label, warnings=warnings)
+    if number < minimum:
+        warnings.append(f"{label} raised to {minimum} by run guardrail")
+        return minimum
+    if number > maximum:
+        warnings.append(f"{label} capped at {maximum} by run guardrail")
+        return maximum
+    return number
 
 
 def _model_preflight_payload(model_client: ModelClient) -> dict[str, Any]:
@@ -654,9 +823,10 @@ async def _call_search(
 
 
 def _raw_search_result_count(max_results: int, target_prospect_count: int) -> int:
-    """Request a broader raw pool while keeping final prospect count focused."""
+    """Return the guarded raw result count requested per search iteration."""
 
-    return max(max_results, min(25, max(1, target_prospect_count) * 2))
+    _ = target_prospect_count
+    return max(1, min(max_results, MAX_SEARCH_RESULTS_PER_ITERATION))
 
 
 def _evidence_from_results(
@@ -686,6 +856,8 @@ async def _prospects_from_evidence(
     enable_llm_judgment: bool = True,
     page_fetch: PageFetchFn | None = None,
     geography_scope: Mapping[str, Any] | None = None,
+    review_cache: MutableMapping[str, CandidateReview] | None = None,
+    max_model_judgments: int | None = None,
 ) -> ProspectExtractionResult:
     directive = _directive_fields(query)
     candidates = _candidate_reviews_from_evidence(evidence, directive=directive)
@@ -696,21 +868,35 @@ async def _prospects_from_evidence(
     extra_evidence: list[dict[str, Any]] = []
     warnings: list[str] = []
     model_fallback_events: list[dict[str, Any]] = []
+    model_judgment_count = 0
+    model_budget_exhausted_count = 0
     page_text_by_domain = _page_text_by_domain(evidence)
     normalized_geography_scope = dict(geography_scope or geography_scope_for_query(query).to_dict())
 
     for review in selected:
         candidate = review.candidate
         triage = review.triage
+        cache_key = _review_cache_key(candidate)
+        cached_review = review_cache.get(cache_key) if review_cache and cache_key else None
+        if cached_review and _cached_review_matches(cached_review, candidate, triage):
+            reviews.append(cached_review.to_dict())
+            if _review_export_qualified(cached_review):
+                prospects.append(_prospect_record_from_judgment(cached_review).to_dict())
+            else:
+                rejections.append(cached_review.to_dict())
+            continue
         if triage.decision == "reject":
             judgment = deterministic_judgment(candidate, triage)
             qualification = prospect_qualification(judgment, triage)
-            rejected = CandidateReview(
+            reviewed = CandidateReview(
                 candidate=candidate,
                 triage=triage,
                 judgment=judgment,
                 qualification=qualification,
-            ).to_dict()
+            )
+            if review_cache is not None and cache_key:
+                review_cache[cache_key] = reviewed
+            rejected = reviewed.to_dict()
             rejections.append(rejected)
             reviews.append(rejected)
             continue
@@ -736,42 +922,50 @@ async def _prospects_from_evidence(
         judgment_error = ""
         model_status = ""
         if enable_llm_judgment:
-            try:
-                model_response = await model_client.invoke(
-                    ModelRequest(
-                        node="prospect_judge",
-                        prompt=build_prospect_judge_prompt(
-                            directive=directive,
-                            geography_scope=normalized_geography_scope,
-                            candidate=candidate,
-                            triage=triage,
-                            page_text=page_text,
-                        ),
-                        response_schema=prospect_judgment_schema(),
-                        metadata={
-                            "evidence_id": candidate.evidence_id,
-                            "domain": candidate.root_domain,
-                            "triage_decision": triage.decision,
-                        },
-                    )
-                )
-                model_fallback_events.extend(
-                    event.to_dict() for event in model_response.fallback_events
-                )
-                structured = model_response.structured or {}
-                status = str(structured.get("status") or "")
-                if status in {"metadata_only", "model_unavailable", "no_available_model"}:
-                    judgment = deterministic_judgment(candidate, triage, page_text=page_text)
-                    judgment_error = status
-                    model_status = status
-                else:
-                    judgment = coerce_prospect_judgment(
-                        structured, candidate=candidate, triage=triage
-                    )
-            except Exception as exc:  # pragma: no cover - exact model parse failures vary
+            if max_model_judgments is not None and model_judgment_count >= max_model_judgments:
                 judgment = deterministic_judgment(candidate, triage, page_text=page_text)
-                judgment_error = f"{type(exc).__name__}: {exc}"
-                model_status = "model_exception"
+                judgment_error = "model_budget_exhausted"
+                model_status = "model_budget_exhausted"
+                model_budget_exhausted_count += 1
+                warnings.append("model_judgment_budget_exhausted")
+            else:
+                model_judgment_count += 1
+                try:
+                    model_response = await model_client.invoke(
+                        ModelRequest(
+                            node="prospect_judge",
+                            prompt=build_prospect_judge_prompt(
+                                directive=directive,
+                                geography_scope=normalized_geography_scope,
+                                candidate=candidate,
+                                triage=triage,
+                                page_text=page_text,
+                            ),
+                            response_schema=prospect_judgment_schema(),
+                            metadata={
+                                "evidence_id": candidate.evidence_id,
+                                "domain": candidate.root_domain,
+                                "triage_decision": triage.decision,
+                            },
+                        )
+                    )
+                    model_fallback_events.extend(
+                        event.to_dict() for event in model_response.fallback_events
+                    )
+                    structured = model_response.structured or {}
+                    status = str(structured.get("status") or "")
+                    if status in {"metadata_only", "model_unavailable", "no_available_model"}:
+                        judgment = deterministic_judgment(candidate, triage, page_text=page_text)
+                        judgment_error = status
+                        model_status = status
+                    else:
+                        judgment = coerce_prospect_judgment(
+                            structured, candidate=candidate, triage=triage
+                        )
+                except Exception as exc:  # pragma: no cover - exact model parse failures vary
+                    judgment = deterministic_judgment(candidate, triage, page_text=page_text)
+                    judgment_error = f"{type(exc).__name__}: {exc}"
+                    model_status = "model_exception"
         else:
             judgment = deterministic_judgment(
                 candidate, triage, page_text=page_text, mode="deterministic_disabled"
@@ -787,6 +981,8 @@ async def _prospects_from_evidence(
             error=judgment_error,
             qualification=qualification,
         )
+        if review_cache is not None and cache_key:
+            review_cache[cache_key] = reviewed
         reviews.append(reviewed.to_dict())
         warnings.extend(qualification.qualification_warnings)
         if not qualification.export_qualified:
@@ -801,7 +997,28 @@ async def _prospects_from_evidence(
         extra_evidence=extra_evidence,
         warnings=list(dict.fromkeys(warnings)),
         model_fallback_events=model_fallback_events,
+        model_judgment_count=model_judgment_count,
+        model_judgment_budget_exhausted_count=model_budget_exhausted_count,
     )
+
+
+def _review_cache_key(candidate: ProspectCandidate) -> str:
+    return candidate.root_domain or candidate.domain
+
+
+def _cached_review_matches(
+    review: CandidateReview, candidate: ProspectCandidate, triage: Any
+) -> bool:
+    return (
+        review.candidate.source_url == candidate.source_url
+        and review.candidate.root_domain == candidate.root_domain
+        and review.triage.decision == triage.decision
+    )
+
+
+def _review_export_qualified(review: CandidateReview) -> bool:
+    qualification = review.qualification
+    return bool(qualification and qualification.export_qualified)
 
 
 def _candidate_reviews_from_evidence(
@@ -1192,9 +1409,11 @@ async def run_research(
     model_client: ModelClient | None = None,
     page_fetch: PageFetchFn | None = None,
     require_review: bool = False,
-    max_iterations: int = DEFAULT_MAX_RESEARCH_ITERATIONS,
-    max_results: int = 5,
+    max_iterations: int | None = None,
+    max_results: int | None = None,
     target_prospect_count: int = DEFAULT_TARGET_PROSPECT_COUNT,
+    search_timeout_seconds: int | None = None,
+    model_timeout_seconds: int | None = None,
     enable_llm_judgment: bool = True,
     require_live_model: bool = False,
     progress_callback: ProgressCallback | None = None,
@@ -1205,7 +1424,23 @@ async def run_research(
     """Run the compatibility async research workflow used by G003 tests."""
 
     store = LocalCheckpointStore(checkpoint_dir)
-    selected_model_client = model_client or build_model_client()
+    budget = derive_prospect_run_budget(
+        target_prospect_count,
+        max_iterations=max_iterations,
+        max_results=max_results,
+        search_timeout_seconds=search_timeout_seconds,
+        model_timeout_seconds=model_timeout_seconds,
+    )
+    target_prospect_count = budget.target_prospect_count
+    max_iterations = budget.max_iterations
+    max_results = budget.max_results
+    selected_model_client: ModelClient
+    if model_client is None:
+        selected_model_client = build_model_client(
+            replace(load_config(), model_timeout_seconds=budget.model_timeout_seconds)
+        )
+    else:
+        selected_model_client = model_client
     model_preflight = _ensure_live_model_if_required(
         selected_model_client,
         require_live_model=require_live_model,
@@ -1253,18 +1488,25 @@ async def run_research(
         "iteration": 0,
         "max_iterations": max_iterations,
         "max_results": max_results,
-        "raw_search_max_results": _raw_search_result_count(max_results, target_prospect_count),
+        "raw_search_max_results": budget.raw_search_max_results,
+        "requested_target_prospect_count": budget.requested_target_prospect_count,
         "target_prospect_count": target_prospect_count,
+        "prospect_run_budget": budget.to_dict(),
         "llm_judgment_enabled": enable_llm_judgment,
         "evidence": [],
         "findings": [],
         "fallback_events": [],
         "model_preflight": model_preflight,
         "model_judgment_fallback_events": [],
+        "model_judgment_count": 0,
+        "model_judgment_budget_exhausted_count": 0,
         "prospect_targets": [],
         "prospect_reviews": [],
         "prospect_rejections": [],
-        "warnings": list(geography_scope.get("warnings", [])),
+        "warnings": [
+            *list(geography_scope.get("warnings", [])),
+            *list(budget.warnings),
+        ],
     }
     if geography_alias_suggestion is not None:
         state["geography_alias_suggestion"] = geography_alias_suggestion.to_dict()
@@ -1282,6 +1524,7 @@ async def run_research(
     for warning in state["warnings"]:
         await record("warning", "warning_recorded", message=warning)
 
+    review_cache: dict[str, CandidateReview] = {}
     while route_after_supervisor(state) == "researcher":
         next_iteration = int(state.get("iteration", 0)) + 1
         search_query = _search_query_for_iteration(query, next_iteration, max_iterations)
@@ -1314,6 +1557,11 @@ async def run_research(
             enable_llm_judgment=enable_llm_judgment,
             page_fetch=page_fetch,
             geography_scope=state["geography_scope"],
+            review_cache=review_cache,
+            max_model_judgments=max(
+                0,
+                budget.max_model_judgments - int(state.get("model_judgment_count", 0) or 0),
+            ),
         )
         if extraction.extra_evidence:
             state["evidence"] = _dedupe_evidence(
@@ -1324,6 +1572,12 @@ async def run_research(
                 *list(state.get("model_judgment_fallback_events", [])),
                 *extraction.model_fallback_events,
             ]
+        state["model_judgment_count"] = int(state.get("model_judgment_count", 0) or 0) + int(
+            extraction.model_judgment_count
+        )
+        state["model_judgment_budget_exhausted_count"] = int(
+            state.get("model_judgment_budget_exhausted_count", 0) or 0
+        ) + int(extraction.model_judgment_budget_exhausted_count)
         for warning in extraction.warnings:
             if warning not in state["warnings"]:
                 state["warnings"].append(warning)
@@ -1438,6 +1692,9 @@ async def resume_research(
         max_results=_coerce_int(
             max_results if max_results is not None else state.get("max_results"), 5
         ),
+        target_prospect_count=int(
+            state.get("target_prospect_count", DEFAULT_TARGET_PROSPECT_COUNT) or 1
+        ),
         require_live_model=require_live_model,
         progress_callback=progress_callback,
         review_approved=approve_review,
@@ -1536,7 +1793,9 @@ def run_research_workflow(
     *,
     thread_id: str | None = None,
     checkpoint_dir: str | Path | None = None,
-    max_results: int = 5,
+    max_iterations: int | None = None,
+    max_results: int | None = None,
+    target_prospect_count: int = DEFAULT_TARGET_PROSPECT_COUNT,
     require_live_model: bool = False,
     artifact_dir: str | Path | None = None,
 ) -> ResearchCheckpoint:
@@ -1546,7 +1805,9 @@ def run_research_workflow(
             thread_id=thread_id,
             checkpoint_dir=checkpoint_dir,
             require_review=True,
+            max_iterations=max_iterations,
             max_results=max_results,
+            target_prospect_count=target_prospect_count,
             require_live_model=require_live_model,
             artifact_dir=artifact_dir,
         )

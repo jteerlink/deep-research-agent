@@ -23,6 +23,12 @@ try:
     from .geography import normalize_geography
     from .graph import (
         DEFAULT_TARGET_PROSPECT_COUNT,
+        MAX_MODEL_TIMEOUT_SECONDS,
+        MAX_SEARCH_ITERATIONS,
+        MAX_SEARCH_RESULTS_PER_ITERATION,
+        MAX_SEARCH_TIMEOUT_SECONDS,
+        MAX_TARGET_PROSPECT_COUNT,
+        derive_prospect_run_budget,
         inspect_checkpoints,
         resume_research,
         run_research,
@@ -36,6 +42,12 @@ except ImportError:
     from deep_research_agent.geography import normalize_geography
     from deep_research_agent.graph import (
         DEFAULT_TARGET_PROSPECT_COUNT,
+        MAX_MODEL_TIMEOUT_SECONDS,
+        MAX_SEARCH_ITERATIONS,
+        MAX_SEARCH_RESULTS_PER_ITERATION,
+        MAX_SEARCH_TIMEOUT_SECONDS,
+        MAX_TARGET_PROSPECT_COUNT,
+        derive_prospect_run_budget,
         inspect_checkpoints,
         resume_research,
         run_research,
@@ -218,30 +230,70 @@ def render_app() -> None:
             "Likely need lead reactivation, customer winback, or dormant-database follow-up.",
         )
         thread_id = st.text_input("Thread ID", "")
-        max_iterations = st.number_input("Max iterations", min_value=1, max_value=25, value=3)
         target_prospect_count = st.number_input(
             "Target prospects",
             min_value=1,
-            max_value=100,
+            max_value=MAX_TARGET_PROSPECT_COUNT,
             value=DEFAULT_TARGET_PROSPECT_COUNT,
         )
+        derived_budget = derive_prospect_run_budget(int(target_prospect_count))
+        st.caption(
+            "Budget: "
+            f"{derived_budget.max_iterations} searches, "
+            f"{derived_budget.max_results} results/search, "
+            f"{derived_budget.search_timeout_seconds}s search timeout, "
+            f"{derived_budget.model_timeout_seconds}s model timeout"
+        )
+        for warning in derived_budget.warnings:
+            st.warning(warning)
+        with st.expander("Advanced budget"):
+            override_budget = st.checkbox("Override derived budget", value=False)
+            if override_budget:
+                max_iterations = st.number_input(
+                    "Max iterations",
+                    min_value=1,
+                    max_value=MAX_SEARCH_ITERATIONS,
+                    value=derived_budget.max_iterations,
+                )
+                search_max_results = st.number_input(
+                    "Search max results",
+                    min_value=1,
+                    max_value=MAX_SEARCH_RESULTS_PER_ITERATION,
+                    value=derived_budget.max_results,
+                )
+                timeout_seconds = st.number_input(
+                    "Search timeout seconds",
+                    min_value=1,
+                    max_value=MAX_SEARCH_TIMEOUT_SECONDS,
+                    value=derived_budget.search_timeout_seconds,
+                )
+                model_timeout_seconds = st.number_input(
+                    "Model timeout seconds",
+                    min_value=1,
+                    max_value=MAX_MODEL_TIMEOUT_SECONDS,
+                    value=derived_budget.model_timeout_seconds,
+                )
+                active_budget = derive_prospect_run_budget(
+                    int(target_prospect_count),
+                    max_iterations=int(max_iterations),
+                    max_results=int(search_max_results),
+                    search_timeout_seconds=int(timeout_seconds),
+                    model_timeout_seconds=int(model_timeout_seconds),
+                )
+            else:
+                active_budget = derived_budget
         checkpoint_dir = st.text_input("Checkpoint dir", DEFAULT_CHECKPOINT_DIR)
         artifact_dir = st.text_input("Artifact dir", DEFAULT_ARTIFACT_DIR)
         require_review = st.checkbox("Require review", value=True)
         approve_review = st.checkbox("Approve review", value=False)
         enable_llm_judgment = st.checkbox("LLM prospect judgment", value=True)
 
-        st.header("Search")
-        search_max_results = st.number_input(
-            "Search max results", min_value=1, max_value=100, value=5
-        )
-        timeout_seconds = st.number_input(
-            "Search timeout seconds", min_value=1, max_value=120, value=10
-        )
-
         st.header("Environment")
         env_file = st.text_input("Env file", ".env")
-        runtime_env = env_file_overlay(env_file)
+        runtime_env = {
+            **env_file_overlay(env_file),
+            "DEEP_RESEARCH_MODEL_TIMEOUT_SECONDS": str(active_budget.model_timeout_seconds),
+        }
         provider_keys = provider_env_from_env_file(env_file)
         configured = [
             label for label, env_key in PROVIDER_API_KEY_FIELDS if env_key in provider_keys
@@ -269,7 +321,7 @@ def render_app() -> None:
     try:
         if run_clicked:
             st.session_state.events = []
-            searcher = AsyncMultiProviderSearch(timeout=int(timeout_seconds))
+            searcher = AsyncMultiProviderSearch(timeout=int(active_budget.search_timeout_seconds))
             research_query = build_prospect_directive(industry, geography, query)
             with temporary_env(runtime_env):
                 state = asyncio.run(
@@ -279,9 +331,11 @@ def render_app() -> None:
                         checkpoint_dir=checkpoint_dir,
                         search=searcher.search,
                         require_review=require_review,
-                        max_iterations=int(max_iterations),
-                        max_results=int(search_max_results),
-                        target_prospect_count=int(target_prospect_count),
+                        max_iterations=active_budget.max_iterations,
+                        max_results=active_budget.max_results,
+                        target_prospect_count=active_budget.target_prospect_count,
+                        search_timeout_seconds=active_budget.search_timeout_seconds,
+                        model_timeout_seconds=active_budget.model_timeout_seconds,
                         enable_llm_judgment=bool(enable_llm_judgment),
                         progress_callback=progress,
                         review_approved=approve_review,
@@ -296,7 +350,9 @@ def render_app() -> None:
                 st.error("Thread ID is required to resume.")
             else:
                 st.session_state.events = []
-                searcher = AsyncMultiProviderSearch(timeout=int(timeout_seconds))
+                searcher = AsyncMultiProviderSearch(
+                    timeout=int(active_budget.search_timeout_seconds)
+                )
                 with temporary_env(runtime_env):
                     state = asyncio.run(
                         resume_research(
@@ -304,7 +360,7 @@ def render_app() -> None:
                             checkpoint_dir=checkpoint_dir,
                             approve_review=approve_review,
                             search=searcher.search,
-                            max_results=int(search_max_results),
+                            max_results=active_budget.max_results,
                             progress_callback=progress,
                             artifact_dir=artifact_dir,
                         )

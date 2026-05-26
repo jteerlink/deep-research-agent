@@ -267,7 +267,12 @@ _REQUESTED_ENTITY_TERMS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-_REVIEW_ONLY_MODEL_STATUSES = {"metadata_only", "model_unavailable", "no_available_model"}
+_REVIEW_ONLY_MODEL_STATUSES = {
+    "metadata_only",
+    "model_unavailable",
+    "no_available_model",
+    "model_budget_exhausted",
+}
 _REVIEW_ONLY_JUDGMENT_MODES = {"deterministic_fallback"}
 
 _OWNED_SNIPPET_SIGNALS = (
