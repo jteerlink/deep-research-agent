@@ -10,6 +10,7 @@ from deep_research_agent.tiered_artifacts import (
     BrowserCapture,
     CompanyProspect,
     ContactCandidate,
+    ContactPersonalization,
     PersonalizationSignal,
     SearchDirective,
     TieredResearchRun,
@@ -20,26 +21,25 @@ from deep_research_agent.tiered_artifacts import (
 
 def _sample_run() -> TieredResearchRun:
     return TieredResearchRun(
+        run_id="demo-thread",
         directive=SearchDirective(
             industry="orthodontics",
-            geography="North Texas",
-            target_count=2,
-            criteria=("multi-location", "offers Invisalign"),
-            raw_query="orthodontists north texas",
+            geographic_area="North Texas",
+            target_prospect_count=2,
+            research_criteria="multi-location; offers Invisalign",
         ),
         companies=(
             CompanyProspect(
                 company_id="company_001",
                 name="Acme Ortho",
-                domain="acmeortho.example",
                 website="https://acmeortho.example",
                 industry="orthodontics",
-                geography="Dallas-Fort Worth",
+                geographic_area="Dallas-Fort Worth",
+                locations=("Dallas", "Fort Worth"),
                 fit_score=0.91,
-                confidence=0.87,
-                summary="Multi-location practice | public Invisalign page",
+                fit_rationale="Multi-location practice | public Invisalign page",
                 evidence_ids=("ev_company_001",),
-                metadata={"locations": 3},
+                source_confidence="high",
             ),
         ),
         contacts=(
@@ -47,29 +47,33 @@ def _sample_run() -> TieredResearchRun:
                 contact_id="contact_001",
                 company_id="company_001",
                 name="Dr. Ada Lovelace",
-                role="owner",
-                title="DDS",
-                profile_url="https://acmeortho.example/team/ada",
-                confidence=0.82,
+                role_category="owner",
+                title="owner DDS",
+                profile_urls=("https://acmeortho.example/team/ada",),
+                contact_confidence=0.82,
                 evidence_ids=("ev_contact_001",),
             ),
         ),
-        personalization_signals=(
-            PersonalizationSignal(
-                signal_id="signal_001",
-                company_id="company_001",
+        personalizations=(
+            ContactPersonalization(
                 contact_id="contact_001",
-                signal_type="service_line",
-                summary="Mentions teen Invisalign expansion",
-                suggested_outreach_angle="Lead with teen Invisalign patient reactivation.",
-                evidence_ids=("ev_signal_001",),
-                confidence=0.79,
-            ),
-            PersonalizationSignal(
-                signal_id="signal_002",
-                company_id="company_001",
-                signal_type="company_news",
-                summary="Opened a second location",
+                personalization_signals=(
+                    PersonalizationSignal(
+                        contact_id="contact_001",
+                        signal="Mentions teen Invisalign expansion",
+                        message_angle="Lead with teen Invisalign patient reactivation.",
+                        evidence_ids=("ev_signal_001",),
+                        confidence="high",
+                    ),
+                    PersonalizationSignal(
+                        contact_id="contact_001",
+                        signal="Opened a second location",
+                        message_angle="Ask about local patient reactivation after expansion.",
+                        evidence_ids=("ev_signal_002",),
+                    ),
+                ),
+                suggested_opening_line="Saw the second-location expansion.",
+                do_not_claim=("Do not claim patient volume.",),
             ),
         ),
         browser_captures=(
@@ -86,7 +90,6 @@ def _sample_run() -> TieredResearchRun:
             ),
         ),
         warnings=("Human review required before outreach.",),
-        metadata={"thread_id": "demo-thread"},
     )
 
 
@@ -106,7 +109,8 @@ def test_write_tiered_artifacts_emits_nested_json_csvs_and_markdown(tmp_path) ->
 
     payload = json.loads(result.json_path.read_text())
     assert payload["schema_version"] == TIERED_ARTIFACT_SCHEMA_VERSION
-    assert payload["metadata"] == {"story": "G001", "thread_id": "demo-thread"}
+    assert payload["metadata"] == {"story": "G001"}
+    assert payload["run_id"] == "demo-thread"
     assert payload["directive"]["industry"] == "orthodontics"
     assert payload["companies"][0]["company_id"] == "company_001"
     assert payload["contacts"][0]["company_id"] == "company_001"
@@ -116,7 +120,7 @@ def test_write_tiered_artifacts_emits_nested_json_csvs_and_markdown(tmp_path) ->
     with result.companies_csv_path.open(newline="") as handle:
         company_rows = list(csv.DictReader(handle))
     assert company_rows[0]["evidence_ids"] == '["ev_company_001"]'
-    assert company_rows[0]["metadata_json"] == '{"locations": 3}'
+    assert company_rows[0]["locations"] == '["Dallas", "Fort Worth"]'
 
     with result.contacts_csv_path.open(newline="") as handle:
         contact_rows = list(csv.DictReader(handle))
@@ -124,15 +128,19 @@ def test_write_tiered_artifacts_emits_nested_json_csvs_and_markdown(tmp_path) ->
 
     with result.personalization_csv_path.open(newline="") as handle:
         signal_rows = list(csv.DictReader(handle))
-    assert [row["signal_id"] for row in signal_rows] == ["signal_001", "signal_002"]
+    assert [row["signal"] for row in signal_rows] == [
+        "Mentions teen Invisalign expansion",
+        "Opened a second location",
+    ]
 
     markdown = result.markdown_path.read_text()
     assert "# Tiered Prospect Research Report" in markdown
     assert "## Directive" in markdown
     assert "### Company: Acme Ortho" in markdown
     assert "Multi-location practice \\| public Invisalign page" in markdown
-    assert "##### Contact: Dr. Ada Lovelace, owner" in markdown
+    assert "##### Contact: Dr. Ada Lovelace, owner DDS" in markdown
     assert "Lead with teen Invisalign patient reactivation." in markdown
+    assert "Do not claim patient volume." in markdown
     assert "## Warnings and Human Review Items" in markdown
 
 
@@ -143,62 +151,148 @@ def test_build_tiered_payload_accepts_mapping_records() -> None:
                 "industry": "med spa",
                 "geography": "Austin",
                 "target_count": 1,
+                "criteria": "membership offers",
             },
-            "companies": [{"company_id": "company_001", "name": "Glow Co"}],
+            "companies": [
+                {
+                    "company_id": "company_001",
+                    "name": "Glow Co",
+                    "evidence_ids": ["ev_company_001"],
+                }
+            ],
             "contacts": [
                 {
                     "contact_id": "contact_001",
                     "company_id": "company_001",
                     "name": "Jordan Lee",
+                    "evidence_ids": ["ev_contact_001"],
                 }
             ],
             "personalization": [
                 {
-                    "signal_id": "signal_001",
-                    "company_id": "company_001",
+                    "contact_id": "contact_001",
                     "summary": "Promotes memberships",
+                    "evidence_ids": ["ev_signal_001"],
                 }
             ],
         }
     )
 
-    assert payload["directive"]["geography"] == "Austin"
-    assert payload["companies"][0]["qualification_status"] == "qualified"
+    assert payload["directive"]["geographic_area"] == "Austin"
+    assert payload["companies"][0]["fit_score"] == 0.0
     assert payload["contacts"][0]["contact_id"] == "contact_001"
-    assert payload["personalization_signals"][0]["signal_type"] == "general"
+    assert payload["personalization_signals"][0]["signal"] == "Promotes memberships"
+
+
+def test_mapping_records_must_carry_evidence_ids() -> None:
+    with pytest.raises(ValueError, match="company company_001 requires evidence_ids"):
+        build_tiered_artifact_payload(
+            {
+                "directive": {
+                    "industry": "med spa",
+                    "geography": "Austin",
+                    "target_count": 1,
+                    "criteria": "membership offers",
+                },
+                "companies": [{"company_id": "company_001", "name": "Glow Co"}],
+            }
+        )
+
+
+def test_markdown_report_escapes_html_like_input(tmp_path) -> None:
+    run = TieredResearchRun(
+        run_id="escape-test",
+        directive=SearchDirective(
+            industry="<script>",
+            geographic_area="Dallas",
+            target_prospect_count=1,
+            research_criteria="A&B",
+        ),
+        companies=(
+            CompanyProspect(
+                company_id="company_001",
+                name="<b>Bad Co</b>",
+                fit_rationale="Uses A&B | C",
+                evidence_ids=("ev_company_001",),
+            ),
+        ),
+    )
+
+    result = write_tiered_artifacts(run, tmp_path)
+
+    markdown = result.markdown_path.read_text()
+    assert "&lt;script&gt;" in markdown
+    assert "&lt;b&gt;Bad Co&lt;/b&gt;" in markdown
+    assert "A&amp;B \\| C" in markdown
 
 
 def test_tiered_run_rejects_cross_company_or_contact_references() -> None:
-    with pytest.raises(ValueError, match="ContactCandidate.company_id is unknown"):
+    with pytest.raises(ValueError, match="references unknown company_id"):
         TieredResearchRun(
-            directive=SearchDirective(industry="legal", geography="Houston", target_count=1),
-            companies=(CompanyProspect(company_id="company_001", name="Firm A"),),
+            run_id="run_001",
+            directive=SearchDirective(
+                industry="legal",
+                geographic_area="Houston",
+                target_prospect_count=1,
+                research_criteria="small firms",
+            ),
+            companies=(
+                CompanyProspect(
+                    company_id="company_001",
+                    name="Firm A",
+                    evidence_ids=("ev_company_001",),
+                ),
+            ),
             contacts=(
                 ContactCandidate(
                     contact_id="contact_001",
                     company_id="company_missing",
                     name="Alex Smith",
+                    evidence_ids=("ev_contact_001",),
                 ),
             ),
         )
 
-    with pytest.raises(ValueError, match="PersonalizationSignal.contact_id is unknown"):
+    with pytest.raises(ValueError, match="personalization references unknown contact_id"):
         TieredResearchRun(
-            directive=SearchDirective(industry="legal", geography="Houston", target_count=1),
-            companies=(CompanyProspect(company_id="company_001", name="Firm A"),),
-            personalization_signals=(
-                PersonalizationSignal(
-                    signal_id="signal_001",
+            run_id="run_001",
+            directive=SearchDirective(
+                industry="legal",
+                geographic_area="Houston",
+                target_prospect_count=1,
+                research_criteria="small firms",
+            ),
+            companies=(
+                CompanyProspect(
                     company_id="company_001",
+                    name="Firm A",
+                    evidence_ids=("ev_company_001",),
+                ),
+            ),
+            personalizations=(
+                ContactPersonalization(
                     contact_id="contact_missing",
+                    personalization_signals=(
+                        PersonalizationSignal(
+                            contact_id="contact_missing",
+                            signal="Promotes litigation support",
+                            message_angle="Ask about intake follow-up",
+                            evidence_ids=("ev_signal_001",),
+                        ),
+                    ),
                 ),
             ),
         )
 
 
 def test_tiered_dataclasses_validate_required_fields() -> None:
-    with pytest.raises(ValueError, match="SearchDirective.target_count must be >= 1"):
-        SearchDirective(industry="dental", geography="Dallas", target_count=0)
+    with pytest.raises(ValueError, match="target_prospect_count must be greater than 0"):
+        SearchDirective(
+            industry="dental",
+            geographic_area="Dallas",
+            target_prospect_count=0,
+            research_criteria="multi-location",
+        )
 
     with pytest.raises(ValueError, match="CompanyProspect.name is required"):
-        CompanyProspect(company_id="company_001", name="")
+        CompanyProspect(company_id="company_001", name="", evidence_ids=("ev_company_001",))

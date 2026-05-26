@@ -134,7 +134,7 @@ def test_tiered_workflow_runs_in_order_and_review_gates_outputs() -> None:
         artifact_writer=artifact_writer,
     ).run(_directive())
 
-    assert state.status == "needs_review"
+    assert state.status == "review_required"
     assert state.review_required is True
     assert [company["name"] for company in state.companies] == ["Acme Dental", "Bright Dental"]
     assert len(state.contacts) == 2
@@ -156,7 +156,7 @@ def test_tiered_workflow_runs_in_order_and_review_gates_outputs() -> None:
     ]
     assert TIERED_WORKFLOW_TOPOLOGY[-1] == "review"
     assert calls[0] == "company:dental:DFW area"
-    assert calls[-1] == "artifact:needs_review"
+    assert calls[-1] == "artifact:review_required"
 
 
 def test_tiered_workflow_preserves_partial_results_with_actionable_warnings() -> None:

@@ -14,6 +14,10 @@ from typing import Any, Literal, Protocol
 
 TierName = Literal["company_discovery", "contact_discovery", "personalization"]
 SearchCallable = Callable[[str, int], Awaitable[Sequence[Any]]]
+EARLY_DISCOVERY_PROVIDERS = ("tavily", "serper", "firecrawl", "ydc", "duckduckgo")
+FINAL_ENRICHMENT_PROVIDERS = ("exa",)
+DEFAULT_MAX_PARALLEL_SEARCH_LANES = 3
+MAX_PARALLEL_SEARCH_LANES = 6
 
 
 class SearchResultLike(Protocol):
@@ -24,6 +28,28 @@ class SearchResultLike(Protocol):
     content: str
     score: float | None
     provider: str
+
+
+@dataclass(frozen=True)
+class ProviderPolicy:
+    """Provider phase policy for tiered prospect research."""
+
+    early_discovery: tuple[str, ...] = EARLY_DISCOVERY_PROVIDERS
+    final_enrichment: tuple[str, ...] = FINAL_ENRICHMENT_PROVIDERS
+
+    def __post_init__(self) -> None:
+        early = tuple(provider.lower() for provider in self.early_discovery)
+        final = tuple(provider.lower() for provider in self.final_enrichment)
+        if "exa" in early:
+            raise ValueError("Exa is reserved for final enrichment, not early discovery")
+        object.__setattr__(self, "early_discovery", early)
+        object.__setattr__(self, "final_enrichment", final)
+
+    def to_dict(self) -> dict[str, list[str]]:
+        return {
+            "early_discovery": list(self.early_discovery),
+            "final_enrichment": list(self.final_enrichment),
+        }
 
 
 @dataclass(frozen=True)
@@ -81,6 +107,18 @@ class ContactSearchTarget:
             raise ValueError("ContactSearchTarget.name is required")
         if not self.company_name.strip():
             raise ValueError("ContactSearchTarget.company_name is required")
+
+
+@dataclass(frozen=True)
+class CompanyDiscoveryLane:
+    """One bounded early-discovery query lane."""
+
+    family: str
+    query: str
+    ordinal: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -166,6 +204,33 @@ def build_company_discovery_queries(directive: TieredSearchDirective) -> tuple[s
     return _dedupe_preserve_order(seeds)
 
 
+def build_company_discovery_lanes(
+    directive: TieredSearchDirective,
+    *,
+    max_parallel_search_lanes: int = DEFAULT_MAX_PARALLEL_SEARCH_LANES,
+) -> tuple[CompanyDiscoveryLane, ...]:
+    """Build bounded, deterministic early company-discovery lanes."""
+
+    if max_parallel_search_lanes < 1:
+        raise ValueError("max_parallel_search_lanes must be >= 1")
+    if max_parallel_search_lanes > MAX_PARALLEL_SEARCH_LANES:
+        raise ValueError(f"max_parallel_search_lanes must be <= {MAX_PARALLEL_SEARCH_LANES}")
+
+    industry = directive.industry.strip()
+    geography = directive.geographic_area.strip()
+    criteria = directive.research_criteria.strip()
+    lane_specs = [
+        ("official_site", f"{industry} official site {geography} {criteria}".strip()),
+        ("local_directory", f"best {industry} companies {geography} directory"),
+        ("industry_context", f"{industry} association {geography} {criteria}".strip()),
+        ("growth_trigger", f"{industry} expansion hiring new location {geography}"),
+    ]
+    return tuple(
+        CompanyDiscoveryLane(family=family, query=query, ordinal=index)
+        for index, (family, query) in enumerate(lane_specs[:max_parallel_search_lanes], 1)
+    )
+
+
 def build_contact_discovery_queries(
     directive: TieredSearchDirective,
     company: CompanySearchTarget,
@@ -230,12 +295,17 @@ def _coerce_hit(tier: TierName, query: str, raw: Any, rank: int) -> TieredSearch
     )
 
 
+def _is_final_enrichment_provider(provider: str, policy: ProviderPolicy) -> bool:
+    return provider.lower() in set(policy.final_enrichment) - set(policy.early_discovery)
+
+
 async def collect_tiered_search(
     tier: TierName,
     queries: Sequence[str],
     *,
     max_results: int = 5,
     search: SearchCallable | None = None,
+    provider_policy: ProviderPolicy | None = None,
 ) -> TieredSearchBatch:
     """Run tier queries and normalize results without hiding partial failures.
 
@@ -248,6 +318,7 @@ async def collect_tiered_search(
         raise ValueError("collect_tiered_search requires an injected search callable")
 
     search_func = search
+    policy = provider_policy or ProviderPolicy()
     normalized_queries = _dedupe_preserve_order(queries)
     hits: list[TieredSearchHit] = []
     failures: list[TieredSearchFailure] = []
@@ -264,10 +335,21 @@ async def collect_tiered_search(
                 )
             )
             continue
-        hits.extend(
-            _coerce_hit(tier, query, result, rank)
-            for rank, result in enumerate(results, 1)
-        )
+        for rank, result in enumerate(results, 1):
+            hit = _coerce_hit(tier, query, result, rank)
+            if _is_final_enrichment_provider(hit.provider, policy):
+                failures.append(
+                    TieredSearchFailure(
+                        tier=tier,
+                        query=query,
+                        error_class="ProviderPolicyError",
+                        error_message=(
+                            f"provider {hit.provider!r} is reserved for final enrichment"
+                        ),
+                    )
+                )
+                continue
+            hits.append(hit)
     return TieredSearchBatch(
         tier=tier,
         queries=normalized_queries,
@@ -281,6 +363,7 @@ async def collect_company_discovery_search(
     *,
     max_results: int = 5,
     search: SearchCallable | None = None,
+    provider_policy: ProviderPolicy | None = None,
 ) -> TieredSearchBatch:
     """Run Tier 1 company-discovery search for a directive."""
 
@@ -289,4 +372,5 @@ async def collect_company_discovery_search(
         build_company_discovery_queries(directive),
         max_results=max_results,
         search=search,
+        provider_policy=provider_policy,
     )

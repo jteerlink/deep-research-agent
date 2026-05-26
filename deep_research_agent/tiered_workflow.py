@@ -17,7 +17,8 @@ from datetime import UTC, datetime
 from typing import Any, Literal, TypeAlias, TypeVar, cast
 from urllib.parse import urlparse
 
-TieredWorkflowStatus = Literal["completed", "needs_review"]
+from .tiered_models import TieredWorkflowStatus
+
 TierName = Literal[
     "directive_parser",
     "company_discovery",
@@ -237,7 +238,7 @@ class TieredResearchWorkflow:
         artifact_paths: Mapping[str, str] = {}
         snapshot = _state_payload(
             directive=normalized_directive,
-            status="needs_review" if self.config.require_human_review else "completed",
+            status="review_required" if self.config.require_human_review else "completed",
             companies=companies,
             contacts=contacts,
             personalization_signals=signals,
@@ -260,7 +261,7 @@ class TieredResearchWorkflow:
 
         return TieredWorkflowState(
             directive=normalized_directive,
-            status="needs_review" if self.config.require_human_review else "completed",
+            status="review_required" if self.config.require_human_review else "completed",
             companies=tuple(companies),
             contacts=tuple(contacts),
             personalization_signals=tuple(signals),

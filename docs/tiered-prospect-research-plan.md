@@ -1,9 +1,9 @@
 # Tiered prospect research adaptation plan
 
-Status: staged implementation in progress. The current CLI/UI wiring exposes
-an offline `tiered-preview` surface for directive and query-shape validation;
-full tiered workflow execution, artifacts, browser capture, and enrichment remain
-future staged work.
+Status: additive local implementation available. The current CLI/UI wiring
+includes offline `tiered-preview`, review-gated `tiered-run`, durable
+`tiered-inspect`, and approval-gated `tiered-resume` with mock final enrichment.
+Live search, browser automation, CRM export, and outreach remain out of scope.
 
 ## Goal
 
@@ -416,9 +416,28 @@ Recommended tests:
   company or contact cannot be enriched.
 
 
-## Current CLI/UI preview surface
+## Current CLI/UI runtime surface
 
-The implemented preview entrypoint is intentionally offline and shallow:
+The implemented entrypoints are intentionally offline and additive. `tiered-run`
+creates a local checkpoint and artifact package, stops at `review_required`, and
+uses mock or injected company records rather than live provider calls:
+
+```bash
+python -m deep_research_agent tiered-run \
+  --industry "dental" \
+  --geography "DFW area" \
+  --criteria "multi-location practices" \
+  --preferred-contact-role owner \
+  --mock-result "Acme Dental|https://acme.example|Multi-location group|mock" \
+  --json
+```
+
+`tiered-inspect` loads the `tiered.prospect_checkpoint.v1` checkpoint, and
+`tiered-resume` accepts an approval JSON payload before final enrichment. Final
+enrichment is rejected for company/contact IDs outside the approved selection
+and cannot mutate company qualification status.
+
+The preview entrypoint remains available for query-shape validation:
 
 ```bash
 python -m deep_research_agent tiered-preview \
@@ -429,9 +448,8 @@ python -m deep_research_agent tiered-preview \
   --json
 ```
 
-This command and the Streamlit preview helper build a `TieredSearchDirective`,
-show company/contact/person query templates, and list the planned artifact names.
-They do not run live search, instantiate `AsyncMultiProviderSearch()`, launch a
-browser, enrich contacts, export CRM data, or generate outreach. Runtime tier
-execution should keep the same injected-client boundary so early discovery can
-exclude Exa until a human-approved enrichment phase.
+The commands and Streamlit preview helper do not instantiate the legacy
+`AsyncMultiProviderSearch()` default provider chain for early tiered discovery,
+launch a browser, export CRM data, or generate outreach. Runtime tier execution
+keeps the injected-client boundary so early discovery can exclude Exa until a
+human-approved enrichment phase.

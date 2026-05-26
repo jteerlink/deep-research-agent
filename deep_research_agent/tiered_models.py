@@ -17,6 +17,16 @@ BrowserCaptureMode = Literal["none", "screenshots_only", "text_extraction", "ful
 SourceConfidence = Literal["low", "medium", "high"]
 RoleCategory = Literal["owner", "executive", "operator", "marketing", "unknown"]
 SignalConfidence = Literal["low", "medium", "high"]
+TieredWorkflowStatus = Literal[
+    "running",
+    "review_required",
+    "approval_recorded",
+    "final_enrichment_blocked",
+    "final_enrichment_complete",
+    "completed",
+    "partial_completed",
+    "failed",
+]
 
 
 class TieredModelValidationError(ValueError):
@@ -230,6 +240,61 @@ class BrowserCapture:
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["evidence_ids"] = list(payload["evidence_ids"])
+        return payload
+
+
+@dataclass(frozen=True)
+class ApprovedProspectSelection:
+    """Human-approved company/contact IDs allowed to proceed past review."""
+
+    approved_company_ids: tuple[str, ...] = ()
+    approved_contact_ids: tuple[str, ...] = ()
+    reviewer: str = ""
+    approved_at: str = ""
+    notes: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "approved_company_ids",
+            _required_text_tuple(self.approved_company_ids, "approved_company_ids"),
+        )
+        object.__setattr__(self, "approved_contact_ids", _text_tuple(self.approved_contact_ids))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "approved_company_ids": list(self.approved_company_ids),
+            "approved_contact_ids": list(self.approved_contact_ids),
+            "reviewer": self.reviewer,
+            "approved_at": self.approved_at,
+            "notes": self.notes,
+        }
+
+
+@dataclass(frozen=True)
+class FinalEnrichmentRecord:
+    """Approval-gated enrichment that must not mutate company qualification."""
+
+    enrichment_id: str
+    company_id: str
+    contact_id: str = ""
+    summary: str = ""
+    evidence_ids: tuple[str, ...] = ()
+    provider: str = "mock"
+    warnings: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_text(self.enrichment_id, "FinalEnrichmentRecord.enrichment_id")
+        _require_text(self.company_id, "FinalEnrichmentRecord.company_id")
+        object.__setattr__(
+            self, "evidence_ids", _required_text_tuple(self.evidence_ids, "evidence_ids")
+        )
+        object.__setattr__(self, "warnings", _text_tuple(self.warnings))
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["evidence_ids"] = list(payload["evidence_ids"])
+        payload["warnings"] = list(payload["warnings"])
         return payload
 
 
@@ -477,6 +542,8 @@ __all__ = [
     "ContactCandidate",
     "ContactPersonalization",
     "EvidenceDepth",
+    "ApprovedProspectSelection",
+    "FinalEnrichmentRecord",
     "PersonalizationSignal",
     "RoleCategory",
     "SearchDirective",
@@ -484,6 +551,7 @@ __all__ = [
     "SourceConfidence",
     "TieredModelValidationError",
     "TieredResearchRun",
+    "TieredWorkflowStatus",
     "coerce_search_directive",
     "tiered_research_schema",
     "validate_tiered_research_run",

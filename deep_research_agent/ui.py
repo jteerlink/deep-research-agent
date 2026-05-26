@@ -37,7 +37,9 @@ try:
     from .tiered_search import (
         CompanySearchTarget,
         ContactSearchTarget,
+        ProviderPolicy,
         TieredSearchDirective,
+        build_company_discovery_lanes,
         build_company_discovery_queries,
         build_contact_discovery_queries,
         build_personalization_queries,
@@ -64,7 +66,9 @@ except ImportError:
     from deep_research_agent.tiered_search import (
         CompanySearchTarget,
         ContactSearchTarget,
+        ProviderPolicy,
         TieredSearchDirective,
+        build_company_discovery_lanes,
         build_company_discovery_queries,
         build_contact_discovery_queries,
         build_personalization_queries,
@@ -159,6 +163,9 @@ def build_tiered_preview(
     return {
         "directive": asdict(directive),
         "company_discovery_queries": list(build_company_discovery_queries(directive)),
+        "company_discovery_lanes": [
+            lane.to_dict() for lane in build_company_discovery_lanes(directive)
+        ],
         "contact_discovery_query_templates": list(
             build_contact_discovery_queries(directive, example_company)
         ),
@@ -166,6 +173,7 @@ def build_tiered_preview(
             build_personalization_queries(directive, example_contact)
         ),
         "search_dependency": "injected",
+        "provider_policy": ProviderPolicy().to_dict(),
         "warnings": [
             "Preview only: no network search, browser capture, enrichment, "
             "or outreach is executed.",
@@ -377,9 +385,9 @@ def render_app() -> None:
         )
         st.caption(f"Live model provider: {model_label}")
 
-        run_clicked = st.button("Run", type="primary", width="stretch")
-        resume_clicked = st.button("Resume", width="stretch")
-        inspect_clicked = st.button("Inspect", width="stretch")
+        run_clicked = st.button("Run G003", type="primary", width="stretch")
+        resume_clicked = st.button("Resume G003", width="stretch")
+        inspect_clicked = st.button("Inspect G003", width="stretch")
 
     def progress(event: dict[str, Any]) -> None:
         st.session_state.events.append(event)

@@ -53,4 +53,7 @@ def test_cli_help_lists_tiered_preview_without_credentials():
 
     output = result.stdout.lower()
     assert "tiered-preview" in output
+    assert "tiered-run" in output
+    assert "tiered-resume" in output
+    assert "tiered-inspect" in output
     assert "api_key" not in output

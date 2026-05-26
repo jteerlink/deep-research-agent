@@ -100,6 +100,13 @@ def test_build_tiered_preview_is_offline_and_query_shaped() -> None:
 
     assert preview["directive"]["target_prospect_count"] == 3
     assert preview["search_dependency"] == "injected"
+    assert preview["provider_policy"]["final_enrichment"] == ["exa"]
+    assert "exa" not in preview["provider_policy"]["early_discovery"]
+    assert [lane["family"] for lane in preview["company_discovery_lanes"]] == [
+        "official_site",
+        "local_directory",
+        "industry_context",
+    ]
     assert preview["company_discovery_queries"][:2] == [
         "dental companies in DFW area",
         "best dental DFW area",

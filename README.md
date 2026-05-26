@@ -29,11 +29,37 @@ variables; it does not ask for secrets in the browser. Fill industry/niche,
 geography, and research criteria so runs search for potential business targets
 rather than generic articles about a topic.
 
-## Tiered prospect preview
+## Tiered prospect research
 
-Use the offline `tiered-preview` command to verify how an industry/geography
-directive expands into company, contact, and personalization search tiers before
-running any live provider calls:
+Use `tiered-run` for a local, review-gated tiered prospect package. The first
+slice is still offline-testable: mock company results stand in for injected
+search, artifacts are written locally, and final enrichment is blocked until a
+human-approved selection is supplied.
+
+```bash
+python -m deep_research_agent tiered-run \
+  --industry "dental" \
+  --geography "DFW area" \
+  --criteria "multi-location practices with reactivation opportunity" \
+  --preferred-contact-role owner \
+  --thread-id demo-tiered \
+  --mock-result "Acme Dental|https://acme.example|Multi-location group|mock" \
+  --json
+```
+
+Review state can be inspected and resumed:
+
+```bash
+python -m deep_research_agent tiered-inspect demo-tiered --json
+python -m deep_research_agent tiered-resume demo-tiered \
+  --approve-selection approval.json \
+  --enable-final-enrichment \
+  --mock-final-enrichment "company_acme_dental|contact_company_acme_dental_001|Approved enrichment|mock" \
+  --json
+```
+
+Use `tiered-preview` when you only need to verify how an industry/geography
+directive expands into company, contact, and personalization query templates:
 
 ```bash
 python -m deep_research_agent tiered-preview \
@@ -47,7 +73,7 @@ python -m deep_research_agent tiered-preview \
 The preview does not perform network search, browser capture, enrichment, or
 outreach. Early tiered discovery is intentionally wired around injected search
 callables so it does not instantiate the legacy `AsyncMultiProviderSearch()`
-default provider chain; Exa remains reserved for later approved enrichment.
+default provider chain; Exa remains reserved for approved final enrichment.
 
 ## Local G003 workflow
 

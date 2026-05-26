@@ -8,13 +8,26 @@ import pytest
 from deep_research_agent.tiered_search import (
     CompanySearchTarget,
     ContactSearchTarget,
+    ProviderPolicy,
     TieredSearchDirective,
+    build_company_discovery_lanes,
     build_company_discovery_queries,
     build_contact_discovery_queries,
     build_personalization_queries,
     collect_company_discovery_search,
     collect_tiered_search,
 )
+
+
+def test_provider_policy_keeps_exa_final_enrichment_only(monkeypatch) -> None:
+    monkeypatch.setenv("EXA_API_KEY", "configured")
+
+    policy = ProviderPolicy()
+
+    assert "exa" not in policy.early_discovery
+    assert policy.final_enrichment == ("exa",)
+    with pytest.raises(ValueError, match="reserved for final enrichment"):
+        ProviderPolicy(early_discovery=("tavily", "exa"))
 
 
 def test_company_discovery_queries_expand_directive_and_dedupe() -> None:
@@ -36,6 +49,26 @@ def test_company_discovery_queries_expand_directive_and_dedupe() -> None:
         "dental DFW area multi-location practices",
         "dental trade associations DFW area",
     )
+
+
+def test_company_discovery_lanes_are_bounded_and_family_scoped() -> None:
+    directive = TieredSearchDirective(
+        industry="dental",
+        geographic_area="DFW area",
+        research_criteria="multi-location practices",
+    )
+
+    lanes = build_company_discovery_lanes(directive)
+
+    assert [lane.family for lane in lanes] == [
+        "official_site",
+        "local_directory",
+        "industry_context",
+    ]
+    assert len(lanes) == 3
+    assert build_company_discovery_lanes(directive, max_parallel_search_lanes=6)
+    with pytest.raises(ValueError, match="<= 6"):
+        build_company_discovery_lanes(directive, max_parallel_search_lanes=7)
 
 
 def test_contact_and_personalization_queries_are_scoped_to_targets() -> None:
@@ -102,6 +135,26 @@ def test_collect_tiered_search_normalizes_hits_and_records_failures() -> None:
     ]
     assert batch.failures[0].query == "bad query"
     assert batch.failures[0].error_class == "RuntimeError"
+
+
+def test_collect_tiered_search_rejects_final_enrichment_provider_hits() -> None:
+    async def exa_search(_query: str, _max_results: int):
+        return [
+            {
+                "title": "Exa result",
+                "url": "https://example.com",
+                "content": "snippet",
+                "provider": "exa",
+            }
+        ]
+
+    batch = asyncio.run(
+        collect_tiered_search("company_discovery", ["dental DFW"], search=exa_search)
+    )
+
+    assert batch.hits == ()
+    assert batch.failures[0].error_class == "ProviderPolicyError"
+    assert "final enrichment" in batch.failures[0].error_message
 
 
 def test_early_company_discovery_does_not_instantiate_default_search_chain(monkeypatch) -> None:
