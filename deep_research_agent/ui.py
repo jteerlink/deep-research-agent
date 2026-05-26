@@ -203,6 +203,7 @@ def render_app() -> None:
         artifact_dir = st.text_input("Artifact dir", DEFAULT_ARTIFACT_DIR)
         require_review = st.checkbox("Require review", value=True)
         approve_review = st.checkbox("Approve review", value=False)
+        enable_llm_judgment = st.checkbox("LLM prospect judgment", value=True)
 
         st.header("Search")
         search_max_results = st.number_input(
@@ -248,6 +249,7 @@ def render_app() -> None:
                         max_iterations=int(max_iterations),
                         max_results=int(search_max_results),
                         target_prospect_count=int(target_prospect_count),
+                        enable_llm_judgment=bool(enable_llm_judgment),
                         progress_callback=progress,
                         review_approved=approve_review,
                         artifact_dir=artifact_dir,
@@ -295,7 +297,17 @@ def render_app() -> None:
     warning_col.metric("Warnings", len(preview["warnings"]))
     artifact_col.metric("Artifacts", len(preview["artifact_paths"]))
 
-    tabs = st.tabs(["Timeline", "Evidence", "Prospects", "Artifacts", "Markdown", "Raw JSON"])
+    tabs = st.tabs(
+        [
+            "Timeline",
+            "Evidence",
+            "Prospects",
+            "Candidate Reviews",
+            "Artifacts",
+            "Markdown",
+            "Raw JSON",
+        ]
+    )
     with tabs[0]:
         st.subheader("Progress events")
         st.json(st.session_state.events or preview["events"])
@@ -306,12 +318,15 @@ def render_app() -> None:
         st.subheader("Prospect preview")
         st.dataframe(preview["prospect_targets"], width="stretch")
     with tabs[3]:
+        st.subheader("Candidate reviews")
+        st.dataframe(preview["raw_json"].get("prospect_reviews", []), width="stretch")
+    with tabs[4]:
         st.subheader("Artifact paths")
         st.json(preview["artifact_paths"])
-    with tabs[4]:
+    with tabs[5]:
         st.subheader("Markdown preview")
         st.markdown(preview["markdown_preview"] or "_No markdown artifact yet._")
-    with tabs[5]:
+    with tabs[6]:
         st.subheader("Raw state JSON")
         st.code(json.dumps(preview["raw_json"], indent=2, sort_keys=True), language="json")
 

@@ -109,6 +109,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Potential business targets to collect before sufficiency routing.",
     )
     run_parser.add_argument(
+        "--no-llm-judgment",
+        action="store_true",
+        help="Disable structured LLM prospect judgment and use deterministic triage only.",
+    )
+    run_parser.add_argument(
         "--approve",
         action="store_true",
         help="Approve review immediately instead of stopping at the review interrupt.",
@@ -216,6 +221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         max_iterations=args.max_iterations,
                         max_results=args.max_results,
                         target_prospect_count=args.target_prospect_count,
+                        enable_llm_judgment=not args.no_llm_judgment,
                         review_approved=args.approve,
                         artifact_dir=args.artifact_dir,
                     )
@@ -243,6 +249,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     max_iterations=args.max_iterations,
                     max_results=args.max_results,
                     target_prospect_count=args.target_prospect_count,
+                    enable_llm_judgment=not args.no_llm_judgment,
                     review_approved=args.approve,
                     artifact_dir=args.artifact_dir,
                 )

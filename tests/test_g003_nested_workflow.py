@@ -128,6 +128,29 @@ def test_model_client_records_fallback_events_for_unavailable_hosted_providers()
     ]
 
 
+def test_model_client_does_not_treat_local_ollama_as_available() -> None:
+    config = AppConfig(
+        primary_provider=ModelProvider.OLLAMA_NATIVE,
+        ollama_native=OllamaNativeConfig(
+            base_url="http://localhost:11434/api",
+            model="deepseek-v4-pro:cloud",
+            api_key="local-key",
+        ),
+        ollama_openai=OllamaOpenAIConfig(
+            base_url="http://localhost:11434/v1",
+            model="deepseek-v4-pro:cloud",
+            api_key="ollama",
+        ),
+        openai=OpenAIConfig(api_key="", model="openai-test"),
+        codex=CodexConfig(api_key="", model="codex-test"),
+        search=SearchConfig(),
+    )
+    client = build_model_client(config)
+
+    assert client.provider_available(ModelProvider.OLLAMA_NATIVE) is False
+    assert client.provider_available(ModelProvider.OLLAMA_OPENAI) is False
+
+
 def test_thread_id_resume_approves_review_interrupt(tmp_path) -> None:
     workflow = LocalResearchWorkflow(checkpoint_store=LocalCheckpointStore(tmp_path))
     interrupted = asyncio.run(

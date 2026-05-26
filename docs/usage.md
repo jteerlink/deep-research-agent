@@ -52,14 +52,21 @@ The UI supports target industry/niche, geography, research criteria, target
 prospect count, thread settings, max iterations, checkpoint/artifact
 directories, review approval, search max results/timeout, provider API key
 status from `.env` or shell environment, run/resume/inspect buttons, a progress
-timeline, warnings, evidence/prospect previews, artifact paths, markdown
-preview, and raw JSON. Provider keys are not typed into the UI.
+timeline, warnings, evidence/prospect previews, candidate review audit data,
+artifact paths, markdown preview, and raw JSON. Provider keys are not typed into
+the UI.
 
 For live prospect discovery, fill at least industry/niche and geography. A broad
 query such as `AI agency lead reactivation targets` tends to find vendor pages or
 articles; a directive such as `dental practices`, `Dallas-Fort Worth`, and
 `patient reactivation opportunity` produces company-discovery searches and
 returns potential business targets.
+
+Prospect extraction uses broad deterministic triage before model judgment. The
+triage layer rejects obvious directories, aggregators, social/job pages,
+listicles, review pages, and vendor-noise results; plausible owned-domain
+candidates are judged with structured LLM output when a configured provider is
+available. Use `--no-llm-judgment` for deterministic debugging only.
 
 ## Model configuration
 
@@ -88,7 +95,9 @@ OLLAMA_API_KEY=<your-ollama-cloud-key>
 ```
 
 Keep native Ollama and OpenAI-compatible Ollama settings separate. Do not infer
-`/v1` settings from the native `/api` base URL.
+`/v1` settings from the native `/api` base URL. Local Ollama endpoints are not
+used by this app; direct Ollama model calls should go through Ollama Cloud with
+`OLLAMA_API_KEY`.
 
 ## Offline workflow smoke
 
@@ -168,11 +177,11 @@ python -m async_multi_search "AI agency lead reactivation targets" --max-results
 ```
 
 Then run a constrained CLI workflow with a real search result copied into
-`--mock-result`, or call the package search wrappers from a small script. Live
-model transports are still represented by deterministic metadata stubs in the
-current G003 foundation; the CLI redacts configured API keys by default and a
-later goal should replace those stubs with real Ollama/Codex/OpenAI calls behind
-the same fallback event contract.
+`--mock-result`, or call the package search wrappers from a small script.
+Researcher heartbeat model calls remain metadata-only for offline compatibility;
+structured prospect-judgment calls use the configured live provider when
+credentials are available and fall back to deterministic judgment when they are
+not. The CLI redacts configured API keys by default.
 
 ## Verification commands
 

@@ -30,16 +30,16 @@ def test_env_example_documents_explicit_model_provider_split():
         "openai",
         "codex",
     }
-    assert values["OLLAMA_NATIVE_BASE_URL"].rstrip("/").endswith(":11434")
-    assert values["OLLAMA_OPENAI_BASE_URL"].rstrip("/").endswith(":11434/v1")
+    assert values["OLLAMA_NATIVE_BASE_URL"].rstrip("/") == "https://ollama.com/api"
+    assert values["OLLAMA_OPENAI_BASE_URL"] == ""
     assert values["OPENAI_BASE_URL"].rstrip("/").endswith("/v1")
     assert "CODEX_OPENAI_BASE_URL" in values
     assert "CODEX_OPENAI_API_KEY" in values
     assert "CODEX_OPENAI_MODEL" in values
 
     assert values["OLLAMA_NATIVE_BASE_URL"] != values["OLLAMA_OPENAI_BASE_URL"]
-    assert values["OLLAMA_NATIVE_MODEL"] == values["OLLAMA_OPENAI_MODEL"]
-    assert values["OLLAMA_OPENAI_API_KEY"]
+    assert values["OLLAMA_OPENAI_MODEL"] == ""
+    assert values["OLLAMA_OPENAI_API_KEY"] == ""
 
 
 def test_langgraph_config_points_to_package_graph_entrypoint():

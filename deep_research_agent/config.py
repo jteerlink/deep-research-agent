@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 
@@ -26,15 +26,16 @@ class OllamaNativeConfig:
 
     base_url: str = "https://ollama.com/api"
     model: str = "deepseek-v4-pro:cloud"
+    api_key: str = ""
 
 
 @dataclass(frozen=True)
 class OllamaOpenAIConfig:
     """Ollama OpenAI-compatible API configuration."""
 
-    base_url: str = "http://localhost:11434/v1"
-    model: str = "deepseek-v4-pro:cloud"
-    api_key: str = "ollama"
+    base_url: str = ""
+    model: str = ""
+    api_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,10 @@ class AppConfig:
     openai: OpenAIConfig
     codex: CodexConfig
     search: SearchConfig
+    fallback_order: tuple[ModelProvider, ...] = field(
+        default_factory=lambda: (ModelProvider.CODEX, ModelProvider.OPENAI)
+    )
+    retry_attempts: int = 1
 
     @property
     def primary_model(self) -> str:
@@ -114,6 +119,10 @@ def _provider(value: str) -> ModelProvider:
         raise ValueError(f"DRA_PRIMARY_PROVIDER must be one of: {allowed}") from exc
 
 
+def _fallback_order(env: Mapping[str, str]) -> tuple[ModelProvider, ...]:
+    raw = _get(env, "DEEP_RESEARCH_FALLBACK_ORDER", "codex_openai_compatible,openai")
+    return tuple(_provider(part.strip()) for part in raw.split(",") if part.strip())
+
 
 def dotenv_values(path: str | os.PathLike[str] = ".env") -> dict[str, str]:
     dotenv = os.fspath(path)
@@ -153,6 +162,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
                 _get(source, "DRA_PRIMARY_PROVIDER", "ollama_native"),
             )
         ),
+        fallback_order=_fallback_order(source),
         ollama_native=OllamaNativeConfig(
             base_url=_get(
                 source,
@@ -164,22 +174,23 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
                 "OLLAMA_NATIVE_MODEL",
                 _get(source, "DRA_OLLAMA_MODEL", "deepseek-v4-pro:cloud"),
             ),
+            api_key=_get(source, "OLLAMA_API_KEY", ""),
         ),
         ollama_openai=OllamaOpenAIConfig(
             base_url=_get(
                 source,
                 "OLLAMA_OPENAI_BASE_URL",
-                _get(source, "DRA_OLLAMA_OPENAI_BASE_URL", "http://localhost:11434/v1"),
+                _get(source, "DRA_OLLAMA_OPENAI_BASE_URL", ""),
             ),
             model=_get(
                 source,
                 "OLLAMA_OPENAI_MODEL",
-                _get(source, "DRA_OLLAMA_OPENAI_MODEL", "deepseek-v4-pro:cloud"),
+                _get(source, "DRA_OLLAMA_OPENAI_MODEL", ""),
             ),
             api_key=_get(
                 source,
                 "OLLAMA_OPENAI_API_KEY",
-                _get(source, "DRA_OLLAMA_OPENAI_API_KEY", "ollama"),
+                _get(source, "DRA_OLLAMA_OPENAI_API_KEY", ""),
             ),
         ),
         openai=OpenAIConfig(
@@ -206,4 +217,5 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
                 _get_int(source, "DRA_SEARCH_TIMEOUT_SECONDS", 10),
             ),
         ),
+        retry_attempts=_get_int(source, "DEEP_RESEARCH_MODEL_RETRY_ATTEMPTS", 1),
     )

@@ -18,14 +18,14 @@ Set `DEEP_RESEARCH_MODEL_PROVIDER` to one of these values:
 
 | Provider | Purpose | Primary variables |
 | --- | --- | --- |
-| `ollama_native` | Direct calls to Ollama's native API. | `OLLAMA_NATIVE_BASE_URL`, `OLLAMA_NATIVE_MODEL` |
-| `ollama_openai` | Ollama's OpenAI-compatible `/v1` API. | `OLLAMA_OPENAI_BASE_URL`, `OLLAMA_OPENAI_MODEL`, `OLLAMA_OPENAI_API_KEY` |
+| `ollama_native` | Direct calls to Ollama Cloud's native API. | `OLLAMA_NATIVE_BASE_URL`, `OLLAMA_NATIVE_MODEL`, `OLLAMA_API_KEY` |
+| `ollama_openai` | Non-local hosted OpenAI-compatible Ollama surface, if explicitly provided. | `OLLAMA_OPENAI_BASE_URL`, `OLLAMA_OPENAI_MODEL`, `OLLAMA_OPENAI_API_KEY` |
 | `openai` | Hosted OpenAI-compatible fallback. | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` |
 | `codex` | Codex/OpenAI-compatible experimental fallback. | `CODEX_OPENAI_BASE_URL`, `CODEX_OPENAI_API_KEY`, `CODEX_OPENAI_MODEL` |
 
 The native Ollama and OpenAI-compatible Ollama settings are intentionally
-separate. Do not infer one from the other in documentation or code; callers can
-choose the transport that matches their client.
+separate. Ollama defaults point at Cloud (`https://ollama.com/api`), and local
+Ollama endpoints are not treated as available model transports.
 
 ## Search compatibility
 
@@ -58,8 +58,8 @@ The UI is a local operator surface over the same checkpointed workflow. It
 reads provider API keys from `.env` or shell environment, captures target
 industry/niche, geography, research criteria, and target prospect count, exposes
 search max-results/timeout controls, and previews progress events, evidence,
-prospects, artifact paths, markdown, and raw JSON without asking for secrets in
-the browser.
+prospects, candidate review decisions, artifact paths, markdown, and raw JSON
+without asking for secrets in the browser.
 
 
 ## G003 local workflow checkpoints

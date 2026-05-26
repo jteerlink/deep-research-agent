@@ -24,12 +24,28 @@ from async_multi_search import SearchResult
 
 from .artifacts import write_research_artifacts
 from .config import ModelProvider, load_config
-from .models import ModelRequest, build_model_client
+from .models import ModelClient, ModelRequest, build_model_client
+from .prospect_judgment import (
+    CandidateReview,
+    ProspectCandidate,
+    build_prospect_judge_prompt,
+    business_name_from_title,
+    canonical_website,
+    coerce_prospect_judgment,
+    deterministic_judgment,
+    domain_from_url,
+    fetch_page_text,
+    is_accepted_prospect,
+    prospect_judgment_schema,
+    registrable_domain,
+    triage_candidate,
+)
 from .prospects import ProspectCitation, ProspectRecord
 
 WorkflowStatus = Literal["completed", "interrupted"]
 ReviewStatus = Literal["pending", "approved"]
 SearchFn = Callable[[str, int], Awaitable[Sequence[SearchResult]] | Sequence[SearchResult]]
+PageFetchFn = Callable[[str], Awaitable[str] | str]
 ProgressCallback = Callable[[dict[str, Any]], object]
 
 DEFAULT_MAX_RESEARCH_ITERATIONS = 3
@@ -65,10 +81,23 @@ class ResearchState(TypedDict, total=False):
     model_metadata: dict[str, Any]
     review_interrupt: dict[str, Any]
     prospect_targets: list[dict[str, Any]]
+    prospect_reviews: list[dict[str, Any]]
+    prospect_rejections: list[dict[str, Any]]
     target_prospect_count: int
+    llm_judgment_enabled: bool
     artifact_paths: dict[str, str]
     warnings: list[str]
     next_node: str
+
+
+@dataclass(frozen=True)
+class ProspectExtractionResult:
+    """Prospects plus audit details derived from evidence."""
+
+    prospects: list[dict[str, Any]]
+    reviews: list[dict[str, Any]]
+    rejections: list[dict[str, Any]]
+    extra_evidence: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -310,18 +339,19 @@ def build_prospect_search_queries(query: str, max_iterations: int) -> list[str]:
     if focus:
         singular_industry = industry[:-1] if industry.endswith("s") else industry
         queries = [
-            _clean_query_part(f"{geography} {industry} Contact About"),
-            _clean_query_part(f"{geography} {singular_industry} official website"),
-            _clean_query_part(f"{geography} local {industry} company"),
-            _clean_query_part(f"{geography} {singular_industry} owner official website"),
+            _clean_query_part(f"{geography} {industry} official websites"),
+            _clean_query_part(f"{geography} {industry} company contact about"),
+            _clean_query_part(f"{geography} local {industry} service providers"),
+            _clean_query_part(f"{geography} {singular_industry} owner founder"),
+            _clean_query_part(f"{geography} {industry} about us contact"),
             _clean_query_part(f"{base} {criteria}"),
         ]
     else:
         queries = [
-            _clean_query_part(f"{base} target businesses companies"),
-            _clean_query_part(f"{base} potential clients local businesses"),
-            _clean_query_part(f"{base} business directory owner founder"),
-            _clean_query_part(f"{base} companies official websites"),
+            _clean_query_part(f"{base} target businesses official websites"),
+            _clean_query_part(f"{base} potential clients local companies"),
+            _clean_query_part(f"{base} company contact about owner founder"),
+            _clean_query_part(f"{base} service providers official websites"),
             _clean_query_part(f"{base} service providers contact"),
         ]
     deduped = list(dict.fromkeys(query for query in queries if query))
@@ -334,86 +364,23 @@ def _search_query_for_iteration(query: str, iteration: int, max_iterations: int)
 
 
 def _domain_from_url(url: str) -> str:
-    parsed = urlparse(url)
-    host = parsed.netloc.lower()
-    if host.startswith("www."):
-        host = host[4:]
-    return host
+    return domain_from_url(url)
 
 
 def _business_name_from_title(title: str, domain: str) -> str:
-    normalized = re.sub(r"\s+", " ", title).strip()
-    for separator in (" | ", " - ", " — ", " – ", ": "):
-        if separator in normalized:
-            parts = [part.strip() for part in normalized.split(separator) if part.strip()]
-            if parts:
-                normalized = min(parts, key=len)
-                break
-    normalized = re.sub(r"^(best|top)\s+\d+\s+", "", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\b(official site|homepage|website)\b", "", normalized, flags=re.I)
-    normalized = normalized.strip(" -|:")
-    if normalized.lower() in {"home", "contact", "contact us", "about", "about us"}:
-        normalized = ""
-    if normalized:
-        return normalized
-    if domain:
-        return domain.split(".")[0].replace("-", " ").title()
-    return "Unknown prospect"
+    return business_name_from_title(title, domain)
 
 
 def _looks_like_business_target(record: Mapping[str, Any]) -> bool:
-    title = str(record.get("title") or "")
-    url = str(record.get("url") or "")
-    title_url = f"{title} {url}".lower()
-    domain = _domain_from_url(url)
-    if not url.startswith(("http://", "https://")):
-        return False
-    non_target_domains = (
-        "indeed.",
-        "linkedin.",
-        "facebook.",
-        "yelp.",
-        "yellowpages.",
-        "mapquest.",
-        "zocdoc.",
-        "healthgrades.",
-        "opencare.",
-        "ada.org",
-        "dcds.org",
-        "dentalpost.",
-    )
-    if any(pattern in domain for pattern in non_target_domains):
-        return False
-    non_target_patterns = (
-        "best ",
-        "top ",
-        "for sale",
-        "available",
-        "jobs",
-        "directory",
-        "how to",
-        "what is",
-        "guide",
-        "blog",
-        "article",
-        "reactivation",
-        "lead generation",
-        "sales agent",
-        "automation",
-        "software",
-        "linkedin.com/pulse",
-        "youtube.com",
-        "facebook.com",
-        "wikipedia.org",
-    )
-    return not any(pattern in title_url for pattern in non_target_patterns)
+    candidate = ProspectCandidate.from_evidence(record)
+    return triage_candidate(candidate).decision != "reject"
 
 
 def _dedupe_evidence(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     seen: set[str] = set()
     deduped: list[dict[str, Any]] = []
     for record in records:
-        key = _domain_from_url(str(record.get("url") or "")) or str(record.get("title") or "")
+        key = _evidence_dedupe_key(record)
         if not key or key in seen:
             continue
         seen.add(key)
@@ -421,6 +388,16 @@ def _dedupe_evidence(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
         copied["id"] = f"ev_{len(deduped) + 1}"
         deduped.append(copied)
     return deduped
+
+
+def _evidence_dedupe_key(record: Mapping[str, Any]) -> str:
+    url = str(record.get("url") or "").strip()
+    source_type = str(record.get("source_type") or "snippet")
+    if url:
+        parsed = urlparse(url)
+        path = parsed.path.rstrip("/") or "/"
+        return f"{source_type}:{parsed.scheme}://{parsed.netloc.lower()}{path}"
+    return f"{source_type}:{record.get('title', '')}"
 
 
 def _append_event(
@@ -599,6 +576,12 @@ async def _call_search(
     return result
 
 
+def _raw_search_result_count(max_results: int, target_prospect_count: int) -> int:
+    """Request a broader raw pool while keeping final prospect count focused."""
+
+    return max(max_results, min(25, max(1, target_prospect_count) * 2))
+
+
 def _evidence_from_results(
     results: Sequence[SearchResult], *, start_index: int = 1, search_query: str = ""
 ) -> list[dict[str, Any]]:
@@ -618,49 +601,246 @@ def _evidence_from_results(
     return evidence
 
 
-def _prospects_from_evidence(evidence: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+async def _prospects_from_evidence(
+    evidence: Sequence[Mapping[str, Any]],
+    *,
+    query: str,
+    model_client: ModelClient,
+    enable_llm_judgment: bool = True,
+    page_fetch: PageFetchFn | None = None,
+) -> ProspectExtractionResult:
+    candidates = _candidate_reviews_from_evidence(evidence)
+    selected, duplicate_rejections = _select_best_reviews_by_domain(candidates)
     prospects: list[dict[str, Any]] = []
-    seen_domains: set[str] = set()
+    reviews: list[dict[str, Any]] = []
+    rejections: list[dict[str, Any]] = list(duplicate_rejections)
+    extra_evidence: list[dict[str, Any]] = []
+    page_text_by_domain = _page_text_by_domain(evidence)
+    directive = _directive_fields(query)
+
+    for review in selected:
+        candidate = review.candidate
+        triage = review.triage
+        if triage.decision == "reject":
+            rejected = review.to_dict()
+            rejections.append(rejected)
+            reviews.append(rejected)
+            continue
+
+        page_text = page_text_by_domain.get(candidate.root_domain, "")
+        page_evidence_id = _page_evidence_id_for_domain(evidence, candidate.root_domain)
+        if triage.decision == "fetch_then_judge" and not page_text:
+            page_text = await _fetch_candidate_page_text(candidate, page_fetch)
+            if page_text:
+                page_evidence_id = f"ev_{len(evidence) + len(extra_evidence) + 1}"
+                extra_evidence.append(
+                    {
+                        "id": page_evidence_id,
+                        "query": candidate.search_query,
+                        "title": f"Page read: {candidate.organization_guess}",
+                        "url": candidate.source_url or candidate.canonical_website,
+                        "snippet": page_text,
+                        "provider": "page_fetch",
+                        "source_type": "page_read",
+                    }
+                )
+
+        judgment_error = ""
+        if enable_llm_judgment:
+            try:
+                model_response = await model_client.invoke(
+                    ModelRequest(
+                        node="prospect_judge",
+                        prompt=build_prospect_judge_prompt(
+                            directive=directive,
+                            candidate=candidate,
+                            triage=triage,
+                            page_text=page_text,
+                        ),
+                        response_schema=prospect_judgment_schema(),
+                        metadata={
+                            "evidence_id": candidate.evidence_id,
+                            "domain": candidate.root_domain,
+                            "triage_decision": triage.decision,
+                        },
+                    )
+                )
+                structured = model_response.structured or {}
+                if structured.get("status") in {"model_unavailable", "no_available_model"}:
+                    judgment = deterministic_judgment(candidate, triage, page_text=page_text)
+                    judgment_error = str(structured.get("status", "model_unavailable"))
+                else:
+                    judgment = coerce_prospect_judgment(
+                        structured, candidate=candidate, triage=triage
+                    )
+            except Exception as exc:  # pragma: no cover - exact model parse failures vary
+                judgment = deterministic_judgment(candidate, triage, page_text=page_text)
+                judgment_error = f"{type(exc).__name__}: {exc}"
+        else:
+            judgment = deterministic_judgment(
+                candidate, triage, page_text=page_text, mode="deterministic_disabled"
+            )
+
+        reviewed = CandidateReview(
+            candidate=candidate,
+            triage=triage,
+            judgment=judgment,
+            page_evidence_id=page_evidence_id,
+            page_text=page_text,
+            error=judgment_error,
+        )
+        reviews.append(reviewed.to_dict())
+        if not is_accepted_prospect(judgment):
+            rejections.append(reviewed.to_dict())
+            continue
+        prospects.append(_prospect_record_from_judgment(reviewed).to_dict())
+
+    return ProspectExtractionResult(
+        prospects=prospects,
+        reviews=reviews,
+        rejections=rejections,
+        extra_evidence=extra_evidence,
+    )
+
+
+def _candidate_reviews_from_evidence(
+    evidence: Sequence[Mapping[str, Any]],
+) -> list[CandidateReview]:
+    reviews: list[CandidateReview] = []
     for record in evidence:
-        if not _looks_like_business_target(record):
+        if str(record.get("source_type") or "snippet") != "snippet":
             continue
-        evidence_id = str(record.get("id", ""))
-        domain = _domain_from_url(str(record.get("url") or ""))
-        if domain in seen_domains:
+        candidate = ProspectCandidate.from_evidence(record)
+        reviews.append(CandidateReview(candidate=candidate, triage=triage_candidate(candidate)))
+    return reviews
+
+
+def _select_best_reviews_by_domain(
+    reviews: Sequence[CandidateReview],
+) -> tuple[list[CandidateReview], list[dict[str, Any]]]:
+    selected_by_domain: dict[str, CandidateReview] = {}
+    rejections: list[dict[str, Any]] = []
+    for review in reviews:
+        domain = review.candidate.root_domain or review.candidate.domain
+        if not domain:
+            rejections.append(review.to_dict())
             continue
-        seen_domains.add(domain)
-        organization = _business_name_from_title(str(record.get("title") or ""), domain)
-        snippet = str(record.get("snippet") or "")
-        citation = ProspectCitation(
-            evidence_id=evidence_id,
-            claim=f"{organization} surfaced as a prospect discovery candidate.",
-            quote="",
-            purpose="discovery",
-            field="target_account_list",
-        )
-        prospect = ProspectRecord(
-            organization=organization,
-            website=str(record.get("url") or ""),
-            summary=snippet or f"Discovered candidate for the research query: {organization}.",
-            confidence=0.55 if record.get("source_type") == "snippet" else 0.75,
-            decision_maker_leads=("Founder/CEO", "Head of Growth"),
-            fit_rationale=(
-                "Potential business target surfaced by company-discovery search; confirm fit "
-                "with page-read evidence before outreach."
-            ),
-            personalized_angles=(
-                snippet[:180] if snippet else "Use cited discovery evidence to tailor outreach.",
-            ),
-            citations=(citation,),
-            metadata={
-                "evidence_type": record.get("source_type", "snippet"),
-                "provider": record.get("provider", ""),
-                "domain": domain,
-                "search_query": record.get("query", ""),
-            },
-        )
-        prospects.append(prospect.to_dict())
-    return prospects
+        existing = selected_by_domain.get(domain)
+        if existing is None or _review_rank(review) > _review_rank(existing):
+            if existing is not None:
+                rejections.append(_duplicate_rejection(existing, kept=review))
+            selected_by_domain[domain] = review
+        else:
+            rejections.append(_duplicate_rejection(review, kept=existing))
+    return list(selected_by_domain.values()), rejections
+
+
+def _review_rank(review: CandidateReview) -> tuple[int, int, int]:
+    decision_rank = {"reject": 0, "fetch_then_judge": 1, "judge": 2}
+    intent_rank = {
+        "homepage": 5,
+        "about": 4,
+        "contact": 4,
+        "service": 3,
+        "unknown": 2,
+        "listicle": 0,
+        "article": 0,
+        "job": 0,
+        "review": 0,
+        "third_party_profile": 0,
+        "invalid_url": 0,
+    }
+    owned_signal = int("owned_business_signal" in review.triage.flags)
+    return (
+        decision_rank.get(review.triage.decision, 0),
+        intent_rank.get(review.triage.page_intent, 1),
+        owned_signal,
+    )
+
+
+def _duplicate_rejection(review: CandidateReview, *, kept: CandidateReview) -> dict[str, Any]:
+    payload = review.to_dict()
+    payload["triage"]["reason"] = f"Duplicate domain suppressed in favor of {kept.candidate.url}"
+    payload["triage"]["flags"] = [*payload["triage"].get("flags", []), "duplicate_domain"]
+    return payload
+
+
+async def _fetch_candidate_page_text(
+    candidate: ProspectCandidate, page_fetch: PageFetchFn | None
+) -> str:
+    urls = [candidate.source_url, candidate.canonical_website]
+    for url in dict.fromkeys(url for url in urls if url):
+        try:
+            result = page_fetch(url) if page_fetch else fetch_page_text(url)
+            text = await result if isinstance(result, Awaitable) else result
+        except Exception:
+            text = ""
+        if text:
+            return str(text)
+    return ""
+
+
+def _page_text_by_domain(evidence: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    pages: dict[str, str] = {}
+    for record in evidence:
+        if str(record.get("source_type") or "") != "page_read":
+            continue
+        root = registrable_domain(domain_from_url(str(record.get("url") or "")))
+        if root and root not in pages:
+            pages[root] = str(record.get("snippet") or record.get("content") or "")
+    return pages
+
+
+def _page_evidence_id_for_domain(evidence: Sequence[Mapping[str, Any]], domain: str) -> str:
+    for record in evidence:
+        if str(record.get("source_type") or "") != "page_read":
+            continue
+        if registrable_domain(domain_from_url(str(record.get("url") or ""))) == domain:
+            return str(record.get("id") or "")
+    return ""
+
+
+def _prospect_record_from_judgment(review: CandidateReview) -> ProspectRecord:
+    judgment = review.judgment
+    if judgment is None:
+        raise ValueError("accepted prospect review requires a judgment")
+    candidate = review.candidate
+    citation_id = review.page_evidence_id or candidate.evidence_id
+    citation = ProspectCitation(
+        evidence_id=citation_id,
+        claim=f"{judgment.organization} surfaced as a prospect discovery candidate.",
+        quote="",
+        purpose="discovery",
+        field="target_account_list",
+    )
+    summary = judgment.evidence_summary or candidate.snippet
+    return ProspectRecord(
+        organization=judgment.organization,
+        website=judgment.canonical_website or canonical_website(candidate.url),
+        summary=summary or f"Discovered candidate for the research query: {judgment.organization}.",
+        confidence=judgment.confidence,
+        decision_maker_leads=judgment.decision_maker_leads
+        or ("Owner/Founder", "General Manager"),
+        fit_rationale=judgment.fit_rationale
+        or "Candidate matched broad prospect triage and structured judgment guardrails.",
+        personalized_angles=judgment.personalized_angles
+        or (summary[:180] if summary else "Use cited discovery evidence to tailor outreach.",),
+        citations=(citation,),
+        metadata={
+            "evidence_type": candidate.source_type,
+            "provider": candidate.provider,
+            "domain": candidate.root_domain,
+            "source_url": candidate.source_url,
+            "search_query": candidate.search_query,
+            "source_category": review.triage.source_category,
+            "page_intent": review.triage.page_intent,
+            "triage_decision": review.triage.decision,
+            "triage_reason": review.triage.reason,
+            "judgment_mode": judgment.mode,
+            "fit_score": judgment.fit_score,
+            "guardrail_flags": list(judgment.guardrail_flags),
+        },
+    )
 
 
 def _artifact_records(state: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -694,10 +874,13 @@ async def run_research(
     thread_id: str | None = None,
     checkpoint_dir: str | Path | None = None,
     search: SearchFn | None = None,
+    model_client: ModelClient | None = None,
+    page_fetch: PageFetchFn | None = None,
     require_review: bool = False,
     max_iterations: int = DEFAULT_MAX_RESEARCH_ITERATIONS,
     max_results: int = 5,
     target_prospect_count: int = DEFAULT_TARGET_PROSPECT_COUNT,
+    enable_llm_judgment: bool = True,
     progress_callback: ProgressCallback | None = None,
     review_approved: bool = False,
     existing_state: Mapping[str, Any] | None = None,
@@ -706,6 +889,7 @@ async def run_research(
     """Run the compatibility async research workflow used by G003 tests."""
 
     store = LocalCheckpointStore(checkpoint_dir)
+    selected_model_client = model_client or build_model_client()
     selected_thread_id: str
     if existing_state and not thread_id:
         selected_thread_id = str(existing_state.get("thread_id") or f"thread-{uuid4()}")
@@ -736,11 +920,15 @@ async def run_research(
         "iteration": 0,
         "max_iterations": max_iterations,
         "max_results": max_results,
+        "raw_search_max_results": _raw_search_result_count(max_results, target_prospect_count),
         "target_prospect_count": target_prospect_count,
+        "llm_judgment_enabled": enable_llm_judgment,
         "evidence": [],
         "findings": [],
         "fallback_events": [],
         "prospect_targets": [],
+        "prospect_reviews": [],
+        "prospect_rejections": [],
         "warnings": [],
     }
 
@@ -752,15 +940,16 @@ async def run_research(
     while route_after_supervisor(state) == "researcher":
         next_iteration = int(state.get("iteration", 0)) + 1
         search_query = _search_query_for_iteration(query, next_iteration, max_iterations)
+        raw_search_results = _raw_search_result_count(max_results, target_prospect_count)
         await record("supervisor", "supervisor_delegated", target="researcher")
         await record(
             "search",
             "search_started",
             query=search_query,
-            max_results=max_results,
+            max_results=raw_search_results,
             target_prospect_count=target_prospect_count,
         )
-        results = await _call_search(search, search_query, max_results=max_results)
+        results = await _call_search(search, search_query, max_results=raw_search_results)
         await record("search", "search_completed", query=search_query, result_count=len(results))
         state["evidence"] = _dedupe_evidence(
             [
@@ -772,10 +961,31 @@ async def run_research(
                 ),
             ]
         )
+        extraction = await _prospects_from_evidence(
+            state["evidence"],
+            query=query,
+            model_client=selected_model_client,
+            enable_llm_judgment=enable_llm_judgment,
+            page_fetch=page_fetch,
+        )
+        if extraction.extra_evidence:
+            state["evidence"] = _dedupe_evidence(
+                [*list(state.get("evidence", [])), *extraction.extra_evidence]
+            )
         state["findings"] = list(state["evidence"])
-        state["prospect_targets"] = _prospects_from_evidence(state["evidence"])
+        state["prospect_targets"] = extraction.prospects
+        state["prospect_reviews"] = extraction.reviews
+        state["prospect_rejections"] = extraction.rejections
+        _append_event(
+            state,
+            "prospects",
+            "prospect_candidates_reviewed",
+            accepted_count=len(extraction.prospects),
+            rejected_count=len(extraction.rejections),
+            llm_judgment_enabled=enable_llm_judgment,
+        )
         state["iteration"] = next_iteration
-        model_response = await build_model_client().invoke(
+        model_response = await selected_model_client.invoke(
             ModelRequest(
                 node="researcher",
                 prompt=search_query,

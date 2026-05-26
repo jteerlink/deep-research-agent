@@ -219,3 +219,4 @@ __marimo__/
 
 # Local workflow checkpoints
 .deep_research_agent/
+graphify-out

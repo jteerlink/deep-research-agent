@@ -36,9 +36,9 @@ class OllamaNativeConfig:
 class OllamaOpenAICompatibleConfig:
     """Configuration for Ollama's OpenAI-compatible `/v1` transport."""
 
-    base_url: str = "http://localhost:11434/v1"
-    model: str = "deepseek-v4-pro:cloud"
-    api_key: str = "ollama"
+    base_url: str = ""
+    model: str = ""
+    api_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -157,9 +157,9 @@ def load_config(env: Mapping[str, str] | None = None) -> AgentConfig:
             api_key=_get(source, "OLLAMA_API_KEY", ""),
         ),
         ollama_openai_compatible=OllamaOpenAICompatibleConfig(
-            base_url=_get(source, "OLLAMA_OPENAI_BASE_URL", "http://localhost:11434/v1"),
-            model=_get(source, "OLLAMA_OPENAI_MODEL", "deepseek-v4-pro:cloud"),
-            api_key=_get(source, "OLLAMA_OPENAI_API_KEY", "ollama"),
+            base_url=_get(source, "OLLAMA_OPENAI_BASE_URL", ""),
+            model=_get(source, "OLLAMA_OPENAI_MODEL", ""),
+            api_key=_get(source, "OLLAMA_OPENAI_API_KEY", ""),
         ),
         openai=OpenAICompatibleConfig(
             base_url=_get(source, "OPENAI_BASE_URL", "https://api.openai.com/v1"),

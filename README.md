@@ -72,12 +72,15 @@ scratch directories.
 
 ## Provider configuration
 
-The configuration intentionally separates Ollama's native HTTP API from its
-OpenAI-compatible API surface:
+The configuration intentionally uses Ollama Cloud for Ollama model calls. Local
+Ollama endpoints such as `localhost:11434` are not used as defaults or accepted
+as available model transports.
 
-- `ollama_native`: uses `DRA_OLLAMA_BASE_URL` and `DRA_OLLAMA_MODEL`.
+- `ollama_native`: uses `OLLAMA_NATIVE_BASE_URL=https://ollama.com/api`,
+  `OLLAMA_NATIVE_MODEL`, and `OLLAMA_API_KEY`.
 - `ollama_openai`: uses `DRA_OLLAMA_OPENAI_BASE_URL`,
-  `DRA_OLLAMA_OPENAI_MODEL`, and `DRA_OLLAMA_OPENAI_API_KEY`.
+  `DRA_OLLAMA_OPENAI_MODEL`, and `DRA_OLLAMA_OPENAI_API_KEY` only for a
+  non-local hosted OpenAI-compatible endpoint.
 - `openai`: uses `OPENAI_API_KEY`, `OPENAI_MODEL`, and `OPENAI_BASE_URL`.
 - `codex`: uses `CODEX_API_KEY`, `CODEX_MODEL`, and `CODEX_BASE_URL`.
 
@@ -88,3 +91,9 @@ Search provider keys remain compatible with the standalone module:
 verification failures, set `DEEP_RESEARCH_CA_BUNDLE` to a PEM bundle; on macOS,
 the search client auto-generates a local bundle from the system keychain when no
 explicit bundle is configured.
+
+Prospect extraction first applies broad deterministic triage to reject obvious
+directories, aggregators, social/job pages, listicles, reviews, and vendor-noise
+results. Plausible owned-domain candidates then go through structured LLM
+judgment when a configured provider is available, with deterministic fallback for
+offline runs.

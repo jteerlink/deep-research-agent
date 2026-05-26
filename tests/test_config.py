@@ -10,7 +10,7 @@ def test_default_config_is_ollama_native() -> None:
 
     assert config.primary_provider is ModelProvider.OLLAMA_NATIVE
     assert config.ollama_native.base_url == "https://ollama.com/api"
-    assert config.ollama_openai.base_url == "http://localhost:11434/v1"
+    assert config.ollama_openai.base_url == ""
     assert config.primary_model == "deepseek-v4-pro:cloud"
 
 
