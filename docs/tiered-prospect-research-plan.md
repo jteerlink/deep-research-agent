@@ -1,7 +1,9 @@
 # Tiered prospect research adaptation plan
 
-Status: planning artifact only. This document describes how to adapt the current
-local deep research framework later; it does not require immediate implementation.
+Status: staged implementation in progress. The current CLI/UI wiring exposes
+an offline `tiered-preview` surface for directive and query-shape validation;
+full tiered workflow execution, artifacts, browser capture, and enrichment remain
+future staged work.
 
 ## Goal
 
@@ -412,3 +414,24 @@ Recommended tests:
   artifacts.
 - Prefer partial results with warnings over failing the whole run when one
   company or contact cannot be enriched.
+
+
+## Current CLI/UI preview surface
+
+The implemented preview entrypoint is intentionally offline and shallow:
+
+```bash
+python -m deep_research_agent tiered-preview \
+  --industry "dental" \
+  --geography "DFW area" \
+  --criteria "multi-location practices" \
+  --preferred-contact-role owner \
+  --json
+```
+
+This command and the Streamlit preview helper build a `TieredSearchDirective`,
+show company/contact/person query templates, and list the planned artifact names.
+They do not run live search, instantiate `AsyncMultiProviderSearch()`, launch a
+browser, enrich contacts, export CRM data, or generate outreach. Runtime tier
+execution should keep the same injected-client boundary so early discovery can
+exclude Exa until a human-approved enrichment phase.

@@ -89,6 +89,41 @@ def test_cli_search_providers_lists_env_example_order_without_brave() -> None:
     ]
 
 
+def test_cli_tiered_preview_json_is_offline_and_query_shaped() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "deep_research_agent",
+            "tiered-preview",
+            "--industry",
+            "dental",
+            "--geography",
+            "DFW area",
+            "--criteria",
+            "multi-location",
+            "--preferred-contact-role",
+            "owner",
+            "--source-preference",
+            "directories",
+            "--json",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["directive"]["industry"] == "dental"
+    assert payload["directive"]["geographic_area"] == "DFW area"
+    assert payload["tiers"]["company_discovery"]["search_dependency"] == "injected"
+    assert payload["tiers"]["company_discovery"][
+        "excludes_default_async_multi_provider_chain"
+    ] is True
+    assert "dental companies in DFW area" in payload["tiers"]["company_discovery"]["queries"]
+    assert "tiered_prospect_research.json" in payload["artifact_plan"]
+
+
 def test_cli_model_status_json_reports_redacted_missing_ollama_key(tmp_path) -> None:
     result = subprocess.run(
         [sys.executable, "-m", "deep_research_agent", "model-status", "--json"],

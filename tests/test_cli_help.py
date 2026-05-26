@@ -35,3 +35,22 @@ def test_package_cli_help_exits_successfully_without_provider_credentials():
     assert result.returncode == 0, output
     assert "usage" in output or "help" in output
     assert "api_key" not in output
+
+
+def test_cli_help_lists_tiered_preview_without_credentials():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "deep_research_agent", "--help"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=True,
+    )
+
+    output = result.stdout.lower()
+    assert "tiered-preview" in output
+    assert "api_key" not in output

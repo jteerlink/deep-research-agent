@@ -29,6 +29,26 @@ variables; it does not ask for secrets in the browser. Fill industry/niche,
 geography, and research criteria so runs search for potential business targets
 rather than generic articles about a topic.
 
+## Tiered prospect preview
+
+Use the offline `tiered-preview` command to verify how an industry/geography
+directive expands into company, contact, and personalization search tiers before
+running any live provider calls:
+
+```bash
+python -m deep_research_agent tiered-preview \
+  --industry "dental" \
+  --geography "DFW area" \
+  --criteria "multi-location practices with reactivation opportunity" \
+  --preferred-contact-role owner \
+  --json
+```
+
+The preview does not perform network search, browser capture, enrichment, or
+outreach. Early tiered discovery is intentionally wired around injected search
+callables so it does not instantiate the legacy `AsyncMultiProviderSearch()`
+default provider chain; Exa remains reserved for later approved enrichment.
+
 ## Local G003 workflow
 
 The G003 runner models the nested workflow topology locally without a hosted UI
