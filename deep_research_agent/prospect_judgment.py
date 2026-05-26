@@ -643,11 +643,27 @@ def build_prospect_judge_prompt(
     triage: CandidateTriage,
     page_text: str,
 ) -> str:
+    schema = prospect_judgment_schema()
     payload = {
         "directive": dict(directive),
         "geography_scope": dict(geography_scope or {}),
         "candidate": candidate.to_prompt_dict(page_text=page_text),
         "deterministic_triage": triage.to_dict(),
+        "task": "Evaluate whether this search result is an export-qualified prospect account.",
+        "required_output_schema": schema,
+        "required_output_keys": [
+            "accepted",
+            "organization",
+            "canonical_website",
+            "fit_score",
+            "confidence",
+            "reject_reason",
+            "fit_rationale",
+            "evidence_summary",
+            "personalized_angles",
+            "decision_maker_leads",
+            "guardrail_flags",
+        ],
         "rules": [
             "Accept only real operating businesses that match the requested industry or niche.",
             (
@@ -663,6 +679,17 @@ def build_prospect_judge_prompt(
                 "that exact vendor category is the requested niche."
             ),
             "Do not invent facts. Use only title, URL, snippet, and page_text evidence.",
+            "Use the exact key 'accepted'; never use 'accept'.",
+            "Use the exact key 'reject_reason'; never use 'reason'.",
+            (
+                "For a real owned operating business matching industry and geography, set "
+                "accepted=true with fit_score from 0.65 to 0.95 and confidence from 0.55 to 0.95."
+            ),
+            "If accepted=true, reject_reason must be empty and fit_rationale must explain the fit.",
+            (
+                "Reject only when evidence shows the candidate is not a direct "
+                "matching prospect account."
+            ),
             "Return only JSON with the requested fields.",
         ],
     }
@@ -676,10 +703,27 @@ def coerce_prospect_judgment(
     triage: CandidateTriage,
     mode: str = "llm",
 ) -> ProspectJudgment:
-    flags = tuple(str(flag) for flag in value.get("guardrail_flags", []) if str(flag))
-    accepted = bool(value.get("accepted"))
+    flags = _string_tuple(value.get("guardrail_flags", []))
+    accepted_value = _coerce_bool(value.get("accepted"))
+    used_accept_alias = False
+    if accepted_value is None and "accept" in value:
+        accepted_value = _coerce_bool(value.get("accept"))
+        used_accept_alias = True
+        flags = (*flags, "model_output_accept_alias")
+    elif accepted_value is None:
+        flags = (*flags, "model_output_missing_accepted")
+    accepted = bool(accepted_value)
+
+    fit_score_missing = _model_field_missing(value, "fit_score")
+    confidence_missing = _model_field_missing(value, "confidence")
     fit_score = _bounded_float(value.get("fit_score"), 0.0)
     confidence = _bounded_float(value.get("confidence"), 0.0)
+    if accepted and fit_score_missing:
+        fit_score = 0.72
+        flags = (*flags, "model_output_missing_fit_score_defaulted")
+    if accepted and confidence_missing:
+        confidence = 0.62
+        flags = (*flags, "model_output_missing_confidence_defaulted")
     if accepted and (fit_score < MIN_ACCEPTED_FIT_SCORE or confidence < MIN_ACCEPTED_CONFIDENCE):
         accepted = False
         flags = (*flags, "below_acceptance_threshold")
@@ -688,21 +732,28 @@ def coerce_prospect_judgment(
         flags = (*flags, "deterministic_reject")
     organization = str(value.get("organization") or candidate.organization_guess).strip()
     website = str(value.get("canonical_website") or candidate.canonical_website).strip()
+    reason_alias = str(value.get("reason") or "").strip()
+    reject_reason = str(value.get("reject_reason") or "").strip()
+    fit_rationale = str(value.get("fit_rationale") or "").strip()
+    if reason_alias and not reject_reason and not accepted:
+        reject_reason = reason_alias
+        flags = (*flags, "model_output_reason_alias")
+    if reason_alias and not fit_rationale and accepted:
+        fit_rationale = reason_alias
+        flags = (*flags, "model_output_reason_alias")
+    if used_accept_alias and accepted and not fit_rationale:
+        fit_rationale = "Model accepted the owned business prospect using alias fields."
     return ProspectJudgment(
         accepted=accepted,
         organization=organization or candidate.organization_guess,
         canonical_website=website or candidate.canonical_website,
         fit_score=fit_score,
         confidence=confidence,
-        reject_reason=str(value.get("reject_reason") or "").strip(),
-        fit_rationale=str(value.get("fit_rationale") or "").strip(),
+        reject_reason=reject_reason,
+        fit_rationale=fit_rationale,
         evidence_summary=str(value.get("evidence_summary") or "").strip(),
-        personalized_angles=tuple(
-            str(item).strip() for item in value.get("personalized_angles", []) if str(item).strip()
-        ),
-        decision_maker_leads=tuple(
-            str(item).strip() for item in value.get("decision_maker_leads", []) if str(item).strip()
-        ),
+        personalized_angles=_string_tuple(value.get("personalized_angles", [])),
+        decision_maker_leads=_string_tuple(value.get("decision_maker_leads", [])),
         guardrail_flags=tuple(dict.fromkeys(flags)),
         mode=mode,
     )
@@ -1067,6 +1118,37 @@ def _bounded_float(value: Any, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return min(1.0, max(0.0, number))
+
+
+def _coerce_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "y", "1"}:
+            return True
+        if normalized in {"false", "no", "n", "0"}:
+            return False
+    return None
+
+
+def _model_field_missing(value: Mapping[str, Any], key: str) -> bool:
+    return key not in value or value.get(key) in {None, ""}
+
+
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        items = (value,)
+    elif isinstance(value, Mapping):
+        items = tuple(value.values())
+    else:
+        try:
+            items = tuple(value)
+        except TypeError:
+            items = (value,)
+    return tuple(str(item).strip() for item in items if str(item).strip())
 
 
 def _clean_summary(value: str) -> str:

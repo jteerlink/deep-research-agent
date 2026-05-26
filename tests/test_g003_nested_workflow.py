@@ -370,6 +370,7 @@ def test_ollama_model_transport_uses_configured_ca_bundle(monkeypatch) -> None:
             return None
 
         async def post(self, *_args, **_kwargs):
+            captured["post_json"] = _kwargs.get("json")
             return FakeResponse()
 
     monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/tmp/zscaler.pem")
@@ -391,6 +392,8 @@ def test_ollama_model_transport_uses_configured_ca_bundle(monkeypatch) -> None:
 
     assert response.structured == {"ok": True}
     assert captured["verify"] is verify_context
+    assert captured["timeout"] == 60
+    assert captured["post_json"]["format"]["required"] == ["ok"]
 
 
 def test_thread_id_resume_approves_review_interrupt(tmp_path) -> None:

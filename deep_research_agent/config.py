@@ -74,6 +74,7 @@ class AppConfig:
     openai: OpenAIConfig
     codex: CodexConfig
     search: SearchConfig
+    model_timeout_seconds: int = 60
     fallback_order: tuple[ModelProvider, ...] = field(
         default_factory=lambda: (ModelProvider.CODEX, ModelProvider.OPENAI)
     )
@@ -216,6 +217,11 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
                 "DEEP_RESEARCH_SEARCH_TIMEOUT_SECONDS",
                 _get_int(source, "DRA_SEARCH_TIMEOUT_SECONDS", 10),
             ),
+        ),
+        model_timeout_seconds=_get_int(
+            source,
+            "DEEP_RESEARCH_MODEL_TIMEOUT_SECONDS",
+            _get_int(source, "DRA_MODEL_TIMEOUT_SECONDS", 60),
         ),
         retry_attempts=_get_int(source, "DEEP_RESEARCH_MODEL_RETRY_ATTEMPTS", 1),
     )

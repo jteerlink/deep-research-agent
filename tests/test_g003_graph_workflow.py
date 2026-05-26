@@ -22,9 +22,13 @@ from deep_research_agent.graph import (
 )
 from deep_research_agent.models import ModelRequest, ModelResponse
 from deep_research_agent.prospect_judgment import (
+    MIN_ACCEPTED_CONFIDENCE,
+    MIN_ACCEPTED_FIT_SCORE,
     ProspectCandidate,
     build_prospect_judge_prompt,
     business_name_from_title,
+    coerce_prospect_judgment,
+    prospect_qualification,
     triage_candidate,
 )
 
@@ -468,6 +472,79 @@ def test_prospect_judge_prompt_includes_normalized_geography_scope() -> None:
         "Dallas-Fort Worth TX",
         "DFW",
     ]
+    assert payload["task"] == (
+        "Evaluate whether this search result is an export-qualified prospect account."
+    )
+    assert payload["required_output_keys"][:5] == [
+        "accepted",
+        "organization",
+        "canonical_website",
+        "fit_score",
+        "confidence",
+    ]
+    assert "Use the exact key 'accepted'; never use 'accept'." in payload["rules"]
+    assert "Use the exact key 'reject_reason'; never use 'reason'." in payload["rules"]
+
+
+def test_prospect_judgment_accepts_live_model_alias_fields_for_owned_business() -> None:
+    candidate = ProspectCandidate.from_evidence(
+        {
+            "id": "ev_1",
+            "title": "All Masters Plumbing | Plumbers in DFW & North Texas",
+            "url": "https://allmastersplumbing.com/",
+            "snippet": (
+                "All Masters Plumbing is a trusted Dallas plumbing company offering "
+                "24/7 service for leak repair, drains, and water heaters."
+            ),
+        }
+    )
+    triage = triage_candidate(
+        candidate,
+        directive={"industry": "plumber", "geography": "Texas"},
+    )
+
+    judgment = coerce_prospect_judgment(
+        {
+            "accept": True,
+            "reason": (
+                "All Masters Plumbing is a legitimate plumbing business operating "
+                "in the Dallas-Fort Worth area."
+            ),
+        },
+        candidate=candidate,
+        triage=triage,
+    )
+    qualification = prospect_qualification(judgment, triage)
+
+    assert judgment.accepted is True
+    assert judgment.fit_score >= MIN_ACCEPTED_FIT_SCORE
+    assert judgment.confidence >= MIN_ACCEPTED_CONFIDENCE
+    assert judgment.reject_reason == ""
+    assert "legitimate plumbing business" in judgment.fit_rationale
+    assert "model_output_accept_alias" in judgment.guardrail_flags
+    assert qualification.export_qualified is True
+    assert qualification.sufficiency_qualified is True
+
+
+def test_prospect_judgment_alias_fields_cannot_override_deterministic_reject() -> None:
+    candidate = ProspectCandidate.from_evidence(
+        {
+            "id": "ev_1",
+            "title": "Yelp",
+            "url": "https://www.yelp.com/search?find_desc=Plumbing&find_loc=Dallas",
+            "snippet": "Best Plumbing in Dallas, TX.",
+        }
+    )
+    triage = triage_candidate(candidate)
+
+    judgment = coerce_prospect_judgment(
+        {"accept": True, "reason": "Contains Dallas plumbers."},
+        candidate=candidate,
+        triage=triage,
+    )
+
+    assert judgment.accepted is False
+    assert "deterministic_reject" in judgment.guardrail_flags
 
 
 def test_deterministic_triage_covers_broad_noise_categories() -> None:

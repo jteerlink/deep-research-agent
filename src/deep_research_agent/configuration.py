@@ -87,6 +87,7 @@ class AgentConfig:
         default_factory=CodexOpenAICompatibleConfig
     )
     search: SearchConfig = field(default_factory=SearchConfig)
+    model_timeout_seconds: int = 60
     retry_attempts: int = 1
 
     def provider_model(self, provider: ModelProvider | None = None) -> str:
@@ -175,5 +176,6 @@ def load_config(env: Mapping[str, str] | None = None) -> AgentConfig:
             max_results=_get_int(source, "DEEP_RESEARCH_MAX_SEARCH_RESULTS", 5),
             timeout_seconds=_get_int(source, "DEEP_RESEARCH_SEARCH_TIMEOUT_SECONDS", 10),
         ),
+        model_timeout_seconds=_get_int(source, "DEEP_RESEARCH_MODEL_TIMEOUT_SECONDS", 60),
         retry_attempts=_get_int(source, "DEEP_RESEARCH_MODEL_RETRY_ATTEMPTS", 1),
     )

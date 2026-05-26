@@ -430,7 +430,7 @@ class ConfiguredModelClient:
             "response_format": {"type": "json_object"},
         }
         async with httpx.AsyncClient(
-            timeout=self.config.search.timeout_seconds,
+            timeout=self.config.model_timeout_seconds,
             verify=_httpx_verify_value(),
         ) as client:
             response = await client.post(
@@ -451,9 +451,14 @@ class ConfiguredModelClient:
         api_key = self.provider_api_key(provider)
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        payload = {"model": model, "prompt": request.prompt, "stream": False, "format": "json"}
+        payload = {
+            "model": model,
+            "prompt": request.prompt,
+            "stream": False,
+            "format": request.response_schema or "json",
+        }
         async with httpx.AsyncClient(
-            timeout=self.config.search.timeout_seconds,
+            timeout=self.config.model_timeout_seconds,
             verify=_httpx_verify_value(),
         ) as client:
             response = await client.post(endpoint, headers=headers, json=payload)

@@ -75,8 +75,17 @@ def test_deep_research_search_knobs_take_precedence_over_legacy_aliases() -> Non
             "DRA_MAX_SEARCH_RESULTS": "2",
             "DEEP_RESEARCH_SEARCH_TIMEOUT_SECONDS": "30",
             "DRA_SEARCH_TIMEOUT_SECONDS": "5",
+            "DEEP_RESEARCH_MODEL_TIMEOUT_SECONDS": "90",
+            "DRA_MODEL_TIMEOUT_SECONDS": "15",
         }
     )
 
     assert config.search.max_results == 9
     assert config.search.timeout_seconds == 30
+    assert config.model_timeout_seconds == 90
+
+
+def test_legacy_model_timeout_alias_is_supported() -> None:
+    config = load_config({"DRA_MODEL_TIMEOUT_SECONDS": "45"})
+
+    assert config.model_timeout_seconds == 45
