@@ -24,6 +24,7 @@ from async_multi_search import SearchResult
 
 from .artifacts import write_research_artifacts
 from .config import ModelProvider, load_config
+from .geography import GeoScope, normalize_geography, suggest_geography_alias_update
 from .models import ModelClient, ModelRequest, build_model_client
 from .prospect_judgment import (
     CandidateReview,
@@ -72,6 +73,8 @@ class ResearchState(TypedDict, total=False):
     sufficient: bool
     max_research_iterations: int
     max_iterations: int
+    max_results: int
+    raw_search_max_results: int
     research_iterations: int
     iteration: int
     findings: list[dict[str, Any]]
@@ -83,6 +86,8 @@ class ResearchState(TypedDict, total=False):
     prospect_targets: list[dict[str, Any]]
     prospect_reviews: list[dict[str, Any]]
     prospect_rejections: list[dict[str, Any]]
+    geography_scope: dict[str, Any]
+    geography_alias_suggestion: dict[str, Any]
     target_prospect_count: int
     llm_judgment_enabled: bool
     artifact_paths: dict[str, str]
@@ -327,6 +332,12 @@ def _directive_fields(query: str) -> dict[str, str]:
     return fields
 
 
+def geography_scope_for_query(query: str) -> GeoScope:
+    """Return normalized geography context for a structured research directive."""
+
+    return normalize_geography(_directive_fields(query).get("geography", ""))
+
+
 def build_prospect_search_queries(query: str, max_iterations: int) -> list[str]:
     """Expand a prospect directive into business-discovery search queries."""
 
@@ -334,6 +345,32 @@ def build_prospect_search_queries(query: str, max_iterations: int) -> list[str]:
     criteria = fields.get("criteria", _clean_query_part(query))
     industry = fields.get("industry", "")
     geography = fields.get("geography", "")
+    geography_scope = normalize_geography(geography)
+    geography_terms = list(geography_scope.search_terms)
+    if industry and geography and len(geography_terms) > 1:
+        singular_industry = industry[:-1] if industry.endswith("s") else industry
+        patterns = (
+            "{geo} {industry} official websites",
+            "{geo} {industry} official websites",
+            "{geo} {industry} company contact about",
+            "{geo} {industry} service providers",
+            "{geo} {singular_industry} owner founder",
+            "{geo} {industry} about us contact",
+        )
+        queries = [
+            _clean_query_part(
+                patterns[min(index, len(patterns) - 1)].format(
+                    geo=term, industry=industry, singular_industry=singular_industry
+                )
+            )
+            for index, term in enumerate(geography_terms)
+        ]
+        base = _clean_query_part(f"{industry} {geography_scope.canonical}")
+        if criteria:
+            queries.append(_clean_query_part(f"{base} {criteria}"))
+        deduped = list(dict.fromkeys(query for query in queries if query))
+        return deduped[: max(1, max_iterations)]
+
     focus = _clean_query_part(" ".join(part for part in (industry, geography) if part))
     base = focus or criteria or "business prospects"
     if focus:
@@ -608,6 +645,7 @@ async def _prospects_from_evidence(
     model_client: ModelClient,
     enable_llm_judgment: bool = True,
     page_fetch: PageFetchFn | None = None,
+    geography_scope: Mapping[str, Any] | None = None,
 ) -> ProspectExtractionResult:
     candidates = _candidate_reviews_from_evidence(evidence)
     selected, duplicate_rejections = _select_best_reviews_by_domain(candidates)
@@ -617,6 +655,7 @@ async def _prospects_from_evidence(
     extra_evidence: list[dict[str, Any]] = []
     page_text_by_domain = _page_text_by_domain(evidence)
     directive = _directive_fields(query)
+    normalized_geography_scope = dict(geography_scope or geography_scope_for_query(query).to_dict())
 
     for review in selected:
         candidate = review.candidate
@@ -653,6 +692,7 @@ async def _prospects_from_evidence(
                         node="prospect_judge",
                         prompt=build_prospect_judge_prompt(
                             directive=directive,
+                            geography_scope=normalized_geography_scope,
                             candidate=candidate,
                             triage=triage,
                             page_text=page_text,
@@ -859,7 +899,12 @@ def _write_artifacts_if_requested(
     paths = write_research_artifacts(
         _artifact_records(state),
         output_dir,
-        metadata={"thread_id": state["thread_id"], "query": state.get("query", "")},
+        metadata={
+            "thread_id": state["thread_id"],
+            "query": state.get("query", ""),
+            "geography_scope": state.get("geography_scope", {}),
+            "geography_alias_suggestion": state.get("geography_alias_suggestion", {}),
+        },
     )
     state["artifact_paths"] = {
         "json": str(paths.json_path),
@@ -890,6 +935,10 @@ async def run_research(
 
     store = LocalCheckpointStore(checkpoint_dir)
     selected_model_client = model_client or build_model_client()
+    geography_scope = geography_scope_for_query(query).to_dict()
+    geography_alias_suggestion = suggest_geography_alias_update(
+        str(geography_scope.get("raw", ""))
+    )
     selected_thread_id: str
     if existing_state and not thread_id:
         selected_thread_id = str(existing_state.get("thread_id") or f"thread-{uuid4()}")
@@ -899,6 +948,11 @@ async def run_research(
     if existing_state and review_approved:
         state = dict(existing_state)
         state.setdefault("events", [])
+        state.setdefault("geography_scope", geography_scope)
+        if geography_alias_suggestion is not None:
+            state.setdefault(
+                "geography_alias_suggestion", geography_alias_suggestion.to_dict()
+            )
         state["thread_id"] = selected_thread_id
         state["status"] = "completed"
         state["sufficient"] = bool(state.get("sufficient", True))
@@ -917,6 +971,7 @@ async def run_research(
         "query": query,
         "thread_id": selected_thread_id,
         "events": events,
+        "geography_scope": geography_scope,
         "iteration": 0,
         "max_iterations": max_iterations,
         "max_results": max_results,
@@ -929,13 +984,17 @@ async def run_research(
         "prospect_targets": [],
         "prospect_reviews": [],
         "prospect_rejections": [],
-        "warnings": [],
+        "warnings": list(geography_scope.get("warnings", [])),
     }
+    if geography_alias_suggestion is not None:
+        state["geography_alias_suggestion"] = geography_alias_suggestion.to_dict()
 
     async def record(node: str, event: str, **metadata: Any) -> None:
         await _notify_progress(progress_callback, _append_event(state, node, event, **metadata))
 
     await record("main", "main_started")
+    for warning in state["warnings"]:
+        await record("warning", "warning_recorded", message=warning)
 
     while route_after_supervisor(state) == "researcher":
         next_iteration = int(state.get("iteration", 0)) + 1
@@ -948,6 +1007,7 @@ async def run_research(
             query=search_query,
             max_results=raw_search_results,
             target_prospect_count=target_prospect_count,
+            geography_scope=state["geography_scope"],
         )
         results = await _call_search(search, search_query, max_results=raw_search_results)
         await record("search", "search_completed", query=search_query, result_count=len(results))
@@ -967,6 +1027,7 @@ async def run_research(
             model_client=selected_model_client,
             enable_llm_judgment=enable_llm_judgment,
             page_fetch=page_fetch,
+            geography_scope=state["geography_scope"],
         )
         if extraction.extra_evidence:
             state["evidence"] = _dedupe_evidence(

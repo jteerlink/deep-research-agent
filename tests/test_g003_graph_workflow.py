@@ -20,7 +20,11 @@ from deep_research_agent.graph import (
     run_research,
 )
 from deep_research_agent.models import ModelRequest, ModelResponse
-from deep_research_agent.prospect_judgment import ProspectCandidate, triage_candidate
+from deep_research_agent.prospect_judgment import (
+    ProspectCandidate,
+    build_prospect_judge_prompt,
+    triage_candidate,
+)
 
 
 class FakeProspectJudge:
@@ -249,6 +253,118 @@ def test_prospect_search_queries_expand_directive_into_business_discovery_querie
         "Phoenix med spas official websites",
         "Phoenix med spas company contact about",
         "Phoenix local med spas service providers",
+    ]
+
+
+def test_prospect_search_queries_expand_ambiguous_geography_terms() -> None:
+    queries = build_prospect_search_queries(
+        "industry: HVAC\ngeography: North Texas\ncriteria: lead reactivation",
+        max_iterations=6,
+    )
+
+    assert queries == [
+        "North Texas HVAC official websites",
+        "Dallas-Fort Worth TX HVAC official websites",
+        "DFW HVAC company contact about",
+        "Dallas TX HVAC service providers",
+        "Fort Worth TX HVAC owner founder",
+        "Plano TX HVAC about us contact",
+    ]
+
+
+def test_run_research_records_normalized_geography_scope(tmp_path) -> None:
+    progress_events: list[dict[str, Any]] = []
+
+    async def search(query: str, _max_results: int):
+        suffix = len([event for event in progress_events if event["event"] == "search_started"])
+        return [
+            SearchResult(
+                f"Actual HVAC {suffix}",
+                f"https://actualhvac-{suffix}.com/",
+                "We provide AC repair in Fort Worth and Dallas.",
+                provider="tavily",
+            )
+        ]
+
+    state = asyncio.run(
+        run_research(
+            "industry: HVAC\ngeography: North Texas\ncriteria: lead reactivation",
+            thread_id="geo-thread",
+            checkpoint_dir=tmp_path,
+            search=search,
+            target_prospect_count=2,
+            max_iterations=2,
+            enable_llm_judgment=False,
+            progress_callback=progress_events.append,
+        )
+    )
+
+    search_started = [
+        event
+        for event in progress_events
+        if event["node"] == "search" and event["event"] == "search_started"
+    ]
+    assert state["geography_scope"]["canonical"] == "Dallas-Fort Worth TX"
+    assert state["geography_scope"]["search_terms"][:3] == [
+        "North Texas",
+        "Dallas-Fort Worth TX",
+        "DFW",
+    ]
+    assert [event["query"] for event in search_started] == [
+        "North Texas HVAC official websites",
+        "Dallas-Fort Worth TX HVAC official websites",
+    ]
+    assert search_started[0]["geography_scope"]["canonical"] == "Dallas-Fort Worth TX"
+    assert state["evidence"][0]["query"] == "North Texas HVAC official websites"
+
+
+def test_run_research_surfaces_alias_suggestion_for_unknown_broad_region(tmp_path) -> None:
+    state = asyncio.run(
+        run_research(
+            "industry: HVAC\ngeography: Central Plains region\ncriteria: lead reactivation",
+            thread_id="geo-suggestion-thread",
+            checkpoint_dir=tmp_path,
+            search=None,
+            target_prospect_count=1,
+            max_iterations=1,
+            enable_llm_judgment=False,
+        )
+    )
+
+    suggestion = state["geography_alias_suggestion"]
+    assert suggestion["alias_key"] == "central plains region"
+    assert suggestion["source"] == "research_run"
+    assert suggestion["search_terms"] == ["Central Plains region"]
+    assert "Geography was not recognized" in state["warnings"][0]
+
+
+def test_prospect_judge_prompt_includes_normalized_geography_scope() -> None:
+    candidate = ProspectCandidate.from_evidence(
+        {
+            "id": "ev_1",
+            "title": "Actual HVAC",
+            "url": "https://actualhvac.com/",
+            "snippet": "We provide AC repair in Fort Worth.",
+        }
+    )
+    prompt = build_prospect_judge_prompt(
+        directive={"industry": "HVAC", "geography": "North Texas"},
+        geography_scope={
+            "raw": "North Texas",
+            "canonical": "Dallas-Fort Worth TX",
+            "search_terms": ["North Texas", "Dallas-Fort Worth TX", "DFW"],
+        },
+        candidate=candidate,
+        triage=triage_candidate(candidate),
+        page_text="",
+    )
+
+    payload = json.loads(prompt)
+    assert payload["geography_scope"]["canonical"] == "Dallas-Fort Worth TX"
+    assert payload["geography_scope"]["search_terms"] == [
+        "North Texas",
+        "Dallas-Fort Worth TX",
+        "DFW",
     ]
 
 

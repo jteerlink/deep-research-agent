@@ -7,6 +7,7 @@ from pathlib import Path
 from deep_research_agent.ui import (
     build_prospect_directive,
     env_file_overlay,
+    preview_geography_scope,
     provider_env_from_env_file,
     provider_env_overlay,
     result_preview,
@@ -72,6 +73,13 @@ def test_build_prospect_directive_includes_business_target_context() -> None:
         "geography: Dallas-Fort Worth\n"
         "criteria: patient reactivation opportunity"
     )
+
+
+def test_preview_geography_scope_expands_known_regions() -> None:
+    preview = preview_geography_scope("North Texas")
+
+    assert preview["canonical"] == "Dallas-Fort Worth TX"
+    assert preview["search_terms"][:3] == ["North Texas", "Dallas-Fort Worth TX", "DFW"]
 
 
 def test_temporary_env_restores_secret_values(monkeypatch) -> None:

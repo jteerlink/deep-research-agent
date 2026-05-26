@@ -62,6 +62,16 @@ articles; a directive such as `dental practices`, `Dallas-Fort Worth`, and
 `patient reactivation opportunity` produces company-discovery searches and
 returns potential business targets.
 
+Known ambiguous geographies are normalized before search. For example,
+`North Texas` keeps the original phrase and adds targeted terms such as
+`Dallas-Fort Worth TX`, `DFW`, `Dallas TX`, and `Fort Worth TX` to the generated
+search queries. The built-in map also covers common large-market shorthands such
+as `Bay Area`, `DMV`, `South Florida`, `Chicagoland`, `Greater Atlanta`,
+`Greater Houston`, `Puget Sound`, `Twin Cities`, `Research Triangle`, and
+`Inland Empire`. Unknown broad regions are searched as entered, surfaced as
+warnings, and included as `geography_alias_suggestion` in the run output so a
+reviewed alias-map update can be added later without guessing silently.
+
 Prospect extraction uses broad deterministic triage before model judgment. The
 triage layer rejects obvious directories, aggregators, social/job pages,
 listicles, review pages, and vendor-noise results; plausible owned-domain

@@ -20,6 +20,7 @@ from async_multi_search import AsyncMultiProviderSearch
 
 try:
     from .config import dotenv_values
+    from .geography import normalize_geography
     from .graph import (
         DEFAULT_TARGET_PROSPECT_COUNT,
         inspect_checkpoints,
@@ -31,6 +32,7 @@ except ImportError:
         raise
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from deep_research_agent.config import dotenv_values
+    from deep_research_agent.geography import normalize_geography
     from deep_research_agent.graph import (
         DEFAULT_TARGET_PROSPECT_COUNT,
         inspect_checkpoints,
@@ -98,6 +100,12 @@ def build_prospect_directive(industry: str, geography: str, criteria: str) -> st
     if criteria.strip():
         parts.append(f"criteria: {criteria.strip()}")
     return "\n".join(parts) if parts else "criteria: business prospects"
+
+
+def preview_geography_scope(geography: str) -> dict[str, Any]:
+    """Return display-safe geography normalization details for the UI."""
+
+    return normalize_geography(geography).to_dict()
 
 
 def env_file_overlay(
@@ -187,6 +195,12 @@ def render_app() -> None:
         st.header("Execution")
         industry = st.text_input("Industry / niche", "")
         geography = st.text_input("Geographic area", "")
+        geography_preview = preview_geography_scope(geography)
+        geography_terms = geography_preview.get("search_terms", [])
+        if geography_terms:
+            st.caption(f"Search geography: {', '.join(geography_terms[:6])}")
+        for warning in geography_preview.get("warnings", []):
+            st.warning(str(warning))
         query = st.text_area(
             "Research criteria",
             "Likely need lead reactivation, customer winback, or dormant-database follow-up.",

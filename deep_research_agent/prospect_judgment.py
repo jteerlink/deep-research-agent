@@ -436,12 +436,14 @@ def prospect_judgment_schema() -> dict[str, Any]:
 def build_prospect_judge_prompt(
     *,
     directive: Mapping[str, str],
+    geography_scope: Mapping[str, Any] | None = None,
     candidate: ProspectCandidate,
     triage: CandidateTriage,
     page_text: str,
 ) -> str:
     payload = {
         "directive": dict(directive),
+        "geography_scope": dict(geography_scope or {}),
         "candidate": candidate.to_prompt_dict(page_text=page_text),
         "deterministic_triage": triage.to_dict(),
         "rules": [

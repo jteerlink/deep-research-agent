@@ -11,6 +11,12 @@ from .config import (
     load_config,
 )
 from .evidence import EvidenceRecord, SearchEvidenceBatch, SearchFailure, collect_search_evidence
+from .geography import (
+    GeoAliasSuggestion,
+    GeoScope,
+    normalize_geography,
+    suggest_geography_alias_update,
+)
 from .graph import (
     CHECKPOINT_SCHEMA_VERSION,
     GRAPH_TOPOLOGY,
@@ -32,6 +38,8 @@ __all__ = [
     "CodexConfig",
     "ModelProvider",
     "FallbackEvent",
+    "GeoAliasSuggestion",
+    "GeoScope",
     "ModelRequest",
     "ModelResponse",
     "OllamaNativeConfig",
@@ -50,6 +58,8 @@ __all__ = [
     "build_artifact_payload",
     "build_model_client",
     "collect_search_evidence",
+    "normalize_geography",
+    "suggest_geography_alias_update",
     "CHECKPOINT_SCHEMA_VERSION",
     "GRAPH_TOPOLOGY",
     "GraphRunResult",
