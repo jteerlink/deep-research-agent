@@ -94,6 +94,12 @@ _FINAL_ENRICHMENT_FIELDS = (
     "evidence_ids",
     "warnings",
 )
+_QUALIFICATION_COUNT_KEYS = (
+    "ready_contact_count",
+    "qualified_company_count",
+    "needs_contact_count",
+    "rejected_candidate_count",
+)
 
 
 def build_tiered_artifact_payload(
@@ -107,6 +113,13 @@ def build_tiered_artifact_payload(
     normalized = _coerce_run(run)
     final_enrichment = tuple(_coerce_final_enrichment(item) for item in final_enrichment_records)
     merged_metadata = dict(metadata or {})
+    qualification_audit = _qualification_audit_records(run, merged_metadata)
+    qualification_summary = _qualification_summary(
+        normalized,
+        qualification_audit,
+        merged_metadata,
+    )
+    merged_metadata.update(qualification_summary)
     return {
         "schema_version": TIERED_ARTIFACT_SCHEMA_VERSION,
         "metadata": _jsonable(merged_metadata),
@@ -128,6 +141,7 @@ def build_tiered_artifact_payload(
         ],
         "browser_captures": [capture.to_dict() for capture in normalized.browser_captures],
         "final_enrichment": [record.to_dict() for record in final_enrichment],
+        "qualification_audit": qualification_audit,
         "warnings": list(normalized.warnings),
     }
 
@@ -186,7 +200,16 @@ def write_tiered_artifacts(
             (_final_enrichment_row(record) for record in final_enrichment),
         )
     markdown_path.write_text(
-        _render_markdown_report(normalized, final_enrichment),
+        _render_markdown_report(
+            normalized,
+            final_enrichment,
+            qualification_audit=_qualification_audit_records(run, dict(metadata or {})),
+            qualification_summary=_qualification_summary(
+                normalized,
+                _qualification_audit_records(run, dict(metadata or {})),
+                dict(metadata or {}),
+            ),
+        ),
         encoding="utf-8",
     )
 
