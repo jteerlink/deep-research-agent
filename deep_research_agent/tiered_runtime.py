@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,11 +35,25 @@ from .tiered_models import (
     TieredResearchRun,
     TieredWorkflowStatus,
 )
+from .tiered_search import (
+    CompanySearchTarget,
+    ProviderPolicy,
+    SearchCallable,
+    TieredSearchDirective,
+    TieredSearchHit,
+    build_contact_discovery_queries,
+    collect_company_discovery_search,
+    collect_tiered_search,
+)
 
 TIERED_CHECKPOINT_SCHEMA_VERSION = "tiered.prospect_checkpoint.v1"
 DEFAULT_TIERED_CHECKPOINT_DIR = ".deep_research_agent/tiered_checkpoints"
 DEFAULT_TIERED_ARTIFACT_DIR = ".deep_research_agent/tiered_artifacts"
 _THREAD_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+FinalEnrichmentFactory = Callable[
+    [TieredResearchRun, ApprovedProspectSelection],
+    Sequence[FinalEnrichmentRecord],
+]
 
 
 @dataclass(frozen=True)
@@ -157,6 +172,92 @@ def run_tiered_research(
     )
 
 
+async def run_tiered_research_with_search(
+    directive: SearchDirective,
+    *,
+    search: SearchCallable,
+    thread_id: str | None = None,
+    checkpoint_dir: str | Path = DEFAULT_TIERED_CHECKPOINT_DIR,
+    artifact_dir: str | Path = DEFAULT_TIERED_ARTIFACT_DIR,
+    max_results: int = 5,
+    max_contact_queries_per_company: int = 2,
+    provider_policy: ProviderPolicy | None = None,
+) -> TieredCheckpoint:
+    """Create a review-gated tiered checkpoint from live injected search results."""
+
+    if max_results < 1:
+        raise ValueError("max_results must be >= 1")
+    if max_contact_queries_per_company < 1:
+        raise ValueError("max_contact_queries_per_company must be >= 1")
+
+    active_thread_id = _validate_thread_id(thread_id or f"tiered-{uuid4().hex[:12]}")
+    search_directive = _search_directive_from_run_directive(directive)
+    policy = provider_policy or ProviderPolicy()
+    company_batch = await collect_company_discovery_search(
+        search_directive,
+        max_results=max_results,
+        search=search,
+        provider_policy=policy,
+    )
+    companies = _companies_from_search_hits(company_batch.hits, directive)
+    contacts: list[ContactCandidate] = []
+    contact_failures = 0
+    for company in companies:
+        target = CompanySearchTarget(company.name, website=company.website)
+        queries = build_contact_discovery_queries(search_directive, target)[
+            :max_contact_queries_per_company
+        ]
+        contact_batch = await collect_tiered_search(
+            "contact_discovery",
+            queries,
+            max_results=max_results,
+            search=search,
+            provider_policy=policy,
+        )
+        contact_failures += len(contact_batch.failures)
+        company_contacts = _contacts_from_search_hits(contact_batch.hits, company)
+        contacts.extend(company_contacts or _contacts_for_companies([company], directive))
+
+    personalizations = _personalizations_for_contacts(
+        contacts,
+        source_label="live search discovery",
+    )
+    warnings = _live_search_warnings(
+        company_count=len(companies),
+        company_failures=len(company_batch.failures),
+        contact_failures=contact_failures,
+    )
+    run = TieredResearchRun(
+        run_id=active_thread_id,
+        directive=directive,
+        companies=tuple(companies),
+        contacts=tuple(contacts),
+        personalizations=tuple(personalizations),
+        warnings=warnings,
+    )
+    checkpoint = TieredCheckpoint(
+        thread_id=active_thread_id,
+        status="review_required",
+        run=run,
+        events=(
+            _event(
+                "company_discovery_complete",
+                f"{len(companies)} company record(s) generated from live search",
+            ),
+            _event(
+                "review_required",
+                f"{len(contacts)} contact-level prospect row(s) ready for review",
+            ),
+        ),
+        warnings=run.warnings,
+    )
+    return _persist_checkpoint(
+        checkpoint,
+        checkpoint_dir=checkpoint_dir,
+        artifact_dir=artifact_dir,
+    )
+
+
 def resume_tiered_research(
     thread_id: str,
     *,
@@ -164,6 +265,8 @@ def resume_tiered_research(
     artifact_dir: str | Path = DEFAULT_TIERED_ARTIFACT_DIR,
     approval_selection: ApprovedProspectSelection | None = None,
     enable_final_enrichment: bool = False,
+    final_enrichment_records: Sequence[FinalEnrichmentRecord] | None = None,
+    final_enrichment_factory: FinalEnrichmentFactory | None = None,
     mock_final_enrichment: tuple[str, ...] = (),
 ) -> TieredCheckpoint:
     """Resume a tiered checkpoint, optionally recording approval and enrichment."""
@@ -187,18 +290,27 @@ def resume_tiered_research(
             warnings.append("Final enrichment blocked: no approved prospect selection.")
             events.append(_event("final_enrichment_blocked", "missing approved selection"))
         else:
-            proposed = _final_enrichment_records(
-                mock_final_enrichment,
-                approval=approval,
-                run=checkpoint.run,
-            )
+            if final_enrichment_records is not None:
+                proposed = tuple(final_enrichment_records)
+            elif final_enrichment_factory is not None:
+                proposed = tuple(final_enrichment_factory(checkpoint.run, approval))
+            else:
+                proposed = _final_enrichment_records(
+                    mock_final_enrichment,
+                    approval=approval,
+                    run=checkpoint.run,
+                )
             _validate_final_enrichment(proposed, approval, checkpoint.run)
             final_enrichment = list(proposed)
             status = "final_enrichment_complete"
+            providers = ", ".join(
+                sorted({record.provider for record in final_enrichment if record.provider})
+            )
             events.append(
                 _event(
                     "final_enrichment_complete",
-                    f"{len(final_enrichment)} approved enrichment record(s) stored",
+                    f"{len(final_enrichment)} approved enrichment record(s) stored"
+                    + (f" via {providers}" if providers else ""),
                 )
             )
     elif approval_selection is None and approval is None:
@@ -342,6 +454,77 @@ def _companies_from_mock_results(
     return companies[: directive.target_prospect_count]
 
 
+def _search_directive_from_run_directive(directive: SearchDirective) -> TieredSearchDirective:
+    return TieredSearchDirective(
+        industry=directive.industry,
+        geographic_area=directive.geographic_area,
+        target_prospect_count=directive.target_prospect_count,
+        research_criteria=directive.research_criteria,
+        preferred_contact_roles=directive.preferred_contact_roles,
+        source_preferences=directive.source_preferences,
+    )
+
+
+def _companies_from_search_hits(
+    hits: tuple[TieredSearchHit, ...],
+    directive: SearchDirective,
+) -> list[CompanyProspect]:
+    companies: list[CompanyProspect] = []
+    seen: set[str] = set()
+    for hit in hits:
+        name = _company_name_from_hit(hit)
+        key = name.casefold()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        company_id = f"company_{_slug(name) or len(companies) + 1:0>3}"
+        companies.append(
+            CompanyProspect(
+                company_id=company_id,
+                name=name,
+                website=hit.url,
+                industry=directive.industry,
+                geographic_area=directive.geographic_area,
+                fit_score=0.65 if hit.provider else 0.55,
+                fit_rationale=hit.content,
+                evidence_ids=(f"ev_{company_id}_search_{hit.rank:03d}",),
+                source_confidence="medium" if hit.provider else "low",
+            )
+        )
+        if len(companies) >= directive.target_prospect_count:
+            break
+    return companies
+
+
+def _contacts_from_search_hits(
+    hits: tuple[TieredSearchHit, ...],
+    company: CompanyProspect,
+) -> list[ContactCandidate]:
+    contacts: list[ContactCandidate] = []
+    seen: set[str] = set()
+    for hit in hits:
+        name, title = _contact_name_and_title_from_hit(hit, company)
+        key = name.casefold()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        contact_id = f"contact_{_slug(company.company_id)}_{len(contacts) + 1:03d}"
+        contacts.append(
+            ContactCandidate(
+                contact_id=contact_id,
+                company_id=company.company_id,
+                name=name,
+                title=title,
+                role_category=_role_category(title),
+                profile_urls=(hit.url,) if hit.url else (),
+                contact_confidence=0.5 if hit.provider else 0.4,
+                evidence_ids=(f"ev_{contact_id}_search_{hit.rank:03d}",),
+                notes=hit.content,
+            )
+        )
+    return contacts[:3]
+
+
 def _contacts_for_companies(
     companies: list[CompanyProspect],
     directive: SearchDirective,
@@ -367,13 +550,25 @@ def _contacts_for_companies(
 
 def _personalizations_for_contacts(
     contacts: list[ContactCandidate],
+    *,
+    source_label: str = "mock discovery",
 ) -> list[ContactPersonalization]:
     personalizations: list[ContactPersonalization] = []
     for contact in contacts:
+        signal_text = (
+            contact.notes
+            if contact.notes and source_label != "mock discovery"
+            else f"Only {source_label} evidence is available."
+        )
+        message_angle = (
+            "Verify live search context before using this for outreach."
+            if source_label != "mock discovery"
+            else "Use as a review placeholder, not an outreach fact."
+        )
         signal = PersonalizationSignal(
             contact_id=contact.contact_id,
-            signal="Only mock discovery evidence is available.",
-            message_angle="Use as a review placeholder, not an outreach fact.",
+            signal=signal_text,
+            message_angle=message_angle,
             evidence_ids=(f"ev_{contact.contact_id}_personalization_001",),
             confidence="low",
         )
@@ -386,6 +581,26 @@ def _personalizations_for_contacts(
             )
         )
     return personalizations
+
+
+def _live_search_warnings(
+    *,
+    company_count: int,
+    company_failures: int,
+    contact_failures: int,
+) -> tuple[str, ...]:
+    warnings: list[str] = []
+    if company_count:
+        warnings.append("Human review required before final enrichment or outreach use.")
+    else:
+        warnings.append(
+            "No company discovery results were returned; no company records were generated."
+        )
+    if company_failures:
+        warnings.append(f"Company discovery had {company_failures} failed search query/queries.")
+    if contact_failures:
+        warnings.append(f"Contact discovery had {contact_failures} failed search query/queries.")
+    return tuple(warnings)
 
 
 def _final_enrichment_records(
@@ -497,6 +712,54 @@ def _approved_contacts_by_company(
         company_id: tuple(contact_ids)
         for company_id, contact_ids in contacts_by_company.items()
     }
+
+
+def _company_name_from_hit(hit: TieredSearchHit) -> str:
+    candidate = hit.title.strip() or _domain_from_url(hit.url)
+    for separator in (" | ", " - ", " – ", " — ", ":"):
+        if separator in candidate:
+            candidate = candidate.split(separator, 1)[0].strip()
+    return candidate or _domain_from_url(hit.url) or "Search Result Company"
+
+
+def _contact_name_and_title_from_hit(
+    hit: TieredSearchHit,
+    company: CompanyProspect,
+) -> tuple[str, str]:
+    title = hit.title.strip()
+    if not title:
+        return f"Review Contact at {company.name}", "review contact"
+
+    candidate = title
+    for separator in (" | ", " - ", " – ", " — "):
+        if separator in candidate:
+            first, second = candidate.split(separator, 1)
+            if company.name.casefold() in first.casefold():
+                candidate = second.strip()
+            else:
+                candidate = first.strip()
+            break
+    candidate = re.sub(r"\bLinkedIn\b", "", candidate, flags=re.IGNORECASE).strip(" ,")
+    if company.name.casefold() == candidate.casefold():
+        candidate = f"Review Contact at {company.name}"
+
+    role = ""
+    lowered = title.lower()
+    for token in ("owner", "founder", "ceo", "president", "marketing director", "manager"):
+        if token in lowered:
+            role = token
+            break
+    return candidate or f"Review Contact at {company.name}", role or "contact candidate"
+
+
+def _domain_from_url(url: str) -> str:
+    return (
+        url.removeprefix("https://")
+        .removeprefix("http://")
+        .removeprefix("www.")
+        .split("/", 1)[0]
+        .strip()
+    )
 
 
 def _run_from_payload(payload: dict[str, Any]) -> TieredResearchRun:
@@ -632,6 +895,7 @@ def _validate_thread_id(thread_id: str) -> str:
 __all__ = [
     "DEFAULT_TIERED_ARTIFACT_DIR",
     "DEFAULT_TIERED_CHECKPOINT_DIR",
+    "FinalEnrichmentFactory",
     "TIERED_CHECKPOINT_SCHEMA_VERSION",
     "TieredCheckpoint",
     "inspect_tiered_research",
@@ -640,4 +904,5 @@ __all__ = [
     "parse_directive_payload",
     "resume_tiered_research",
     "run_tiered_research",
+    "run_tiered_research_with_search",
 ]

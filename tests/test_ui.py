@@ -4,17 +4,52 @@ import importlib.util
 import os
 from pathlib import Path
 
+from deep_research_agent.tiered_models import ApprovedProspectSelection
+from deep_research_agent.tiered_runtime import (
+    parse_directive_payload,
+    resume_tiered_research,
+    run_tiered_research,
+)
 from deep_research_agent.ui import (
     build_prospect_directive,
     build_tiered_preview,
     env_file_overlay,
+    final_enrichment_csv_bytes,
+    flatten_enriched_prospect_rows,
+    flatten_tiered_prospect_rows,
     model_preflight_from_env_file,
+    prepare_exa_enrichment_selection,
     preview_geography_scope,
     provider_env_from_env_file,
     provider_env_overlay,
     result_preview,
+    selection_from_prospect_rows,
     temporary_env,
+    tiered_early_discovery_searcher,
+    tiered_review_state,
 )
+
+
+def _tiered_checkpoint(tmp_path):
+    directive = parse_directive_payload(
+        {
+            "industry": "dental",
+            "geography": "North Texas",
+            "target_prospect_count": 2,
+            "research_criteria": "multi-location Invisalign",
+            "preferred_contact_roles": ["owner"],
+        }
+    )
+    return run_tiered_research(
+        directive,
+        thread_id="ui-tiered",
+        checkpoint_dir=tmp_path / "checkpoints",
+        artifact_dir=tmp_path / "artifacts",
+        mock_results=(
+            "Acme Dental|https://acme.example|Strong fit|mock",
+            "Beta Dental|https://beta.example|Strong fit|mock",
+        ),
+    )
 
 
 def test_provider_env_overlay_keeps_only_non_empty_supported_keys() -> None:
@@ -113,6 +148,141 @@ def test_build_tiered_preview_is_offline_and_query_shaped() -> None:
     ]
     assert "Example Company owner" in preview["contact_discovery_query_templates"]
     assert preview["warnings"]
+
+
+def test_tiered_early_discovery_searcher_excludes_exa() -> None:
+    searcher = tiered_early_discovery_searcher(timeout=3)
+
+    assert "exa" not in [provider.name for provider in searcher.providers]
+    assert "duckduckgo" in [provider.name for provider in searcher.providers]
+
+
+def test_build_tiered_preview_waits_for_required_fields() -> None:
+    preview = build_tiered_preview(
+        "",
+        " ",
+        "multi-location",
+        target_prospect_count=3,
+    )
+
+    assert preview["ready"] is False
+    assert preview["missing_fields"] == ["industry", "geographic_area"]
+    assert preview["directive"]["research_criteria"] == "multi-location"
+    assert preview["company_discovery_queries"] == []
+    assert preview["provider_policy"]["final_enrichment"] == ["exa"]
+    assert "waiting for industry" in preview["warnings"][0]
+
+
+def test_flatten_tiered_prospect_rows_uses_contact_level_identity(tmp_path) -> None:
+    checkpoint = _tiered_checkpoint(tmp_path)
+    selected = {
+        f"{checkpoint.run.companies[0].company_id}::{checkpoint.run.contacts[0].contact_id}"
+    }
+
+    rows = flatten_tiered_prospect_rows(checkpoint, selected_row_ids=selected)
+
+    assert [row["row_id"] for row in rows] == [
+        f"{checkpoint.run.companies[0].company_id}::{checkpoint.run.contacts[0].contact_id}",
+        f"{checkpoint.run.companies[1].company_id}::{checkpoint.run.contacts[1].contact_id}",
+    ]
+    assert rows[0]["selected"] is True
+    assert rows[1]["selected"] is False
+    assert rows[0]["company_name"] == "Acme Dental"
+    assert rows[0]["contact_name"] == "Review Contact at Acme Dental"
+    assert "review placeholder" in rows[0]["personalization_summary"]
+
+
+def test_tiered_review_state_distinguishes_ready_and_empty_review(tmp_path) -> None:
+    ready = _tiered_checkpoint(tmp_path)
+    empty = run_tiered_research(
+        ready.run.directive,
+        thread_id="ui-tiered-empty",
+        checkpoint_dir=tmp_path / "checkpoints",
+        artifact_dir=tmp_path / "artifacts",
+    )
+
+    assert tiered_review_state(ready) == {
+        "status": "review_required",
+        "prospect_count": 2,
+        "enrichment_count": 0,
+        "review_ready": True,
+        "empty_review": False,
+    }
+    assert tiered_review_state(empty) == {
+        "status": "review_required",
+        "prospect_count": 0,
+        "enrichment_count": 0,
+        "review_ready": False,
+        "empty_review": True,
+    }
+
+
+def test_selected_prospect_rows_build_approval_for_checked_pairs(tmp_path) -> None:
+    rows = flatten_tiered_prospect_rows(_tiered_checkpoint(tmp_path))
+    rows[0]["selected"] = True
+    rows[1]["selected"] = False
+
+    approval = selection_from_prospect_rows(rows, reviewer="tester", approved_at="now")
+
+    assert approval.approved_company_ids == (rows[0]["company_id"],)
+    assert approval.approved_contact_ids == (rows[0]["contact_id"],)
+    assert approval.reviewer == "tester"
+    assert approval.approved_at == "now"
+
+
+def test_missing_exa_key_blocks_ui_enrichment_without_checkpoint_write(tmp_path) -> None:
+    checkpoint = _tiered_checkpoint(tmp_path)
+    rows = flatten_tiered_prospect_rows(checkpoint)
+    rows[0]["selected"] = True
+
+    approval, error = prepare_exa_enrichment_selection(rows, {})
+
+    assert approval is None
+    assert error == "EXA_API_KEY is required to run final Exa enrichment for selected prospects."
+    assert resume_tiered_research(
+        checkpoint.thread_id,
+        checkpoint_dir=tmp_path / "checkpoints",
+        artifact_dir=tmp_path / "artifacts",
+    ).final_enrichment == ()
+
+
+def test_enriched_rows_join_display_labels_and_csv_bytes(tmp_path) -> None:
+    checkpoint = _tiered_checkpoint(tmp_path)
+    company_id = checkpoint.run.companies[0].company_id
+    contact_id = checkpoint.run.contacts[0].contact_id
+    approval = ApprovedProspectSelection(
+        approved_company_ids=(company_id,),
+        approved_contact_ids=(contact_id,),
+    )
+    enriched = resume_tiered_research(
+        checkpoint.thread_id,
+        checkpoint_dir=tmp_path / "checkpoints",
+        artifact_dir=tmp_path / "artifacts",
+        approval_selection=approval,
+        enable_final_enrichment=True,
+        mock_final_enrichment=(f"{company_id}|{contact_id}|Approved enrichment only|exa",),
+    )
+
+    rows = flatten_enriched_prospect_rows(enriched)
+    csv_bytes = final_enrichment_csv_bytes(enriched)
+
+    assert rows == [
+        {
+            "enrichment_id": "final_001",
+            "provider": "exa",
+            "company_id": company_id,
+            "company_name": "Acme Dental",
+            "website": "https://acme.example",
+            "contact_id": contact_id,
+            "contact_name": "Review Contact at Acme Dental",
+            "contact_title": "owner",
+            "summary": "Approved enrichment only",
+            "evidence_ids": "ev_final_001",
+            "warnings": "",
+        }
+    ]
+    assert b"final_001" in csv_bytes
+    assert b"Approved enrichment only" in csv_bytes
 
 
 def test_preview_geography_scope_expands_known_regions() -> None:
