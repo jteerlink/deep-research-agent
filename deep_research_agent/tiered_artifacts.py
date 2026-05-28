@@ -396,6 +396,103 @@ def _coerce_final_enrichment(
     )
 
 
+def _qualification_audit_records(
+    run: TieredResearchRun | Mapping[str, Any],
+    metadata: dict[str, Any],
+) -> list[dict[str, Any]]:
+    raw: Any = None
+    if isinstance(run, Mapping):
+        raw = run.get("qualification_audit") or run.get("qualification_records")
+    if raw is None:
+        raw = metadata.pop("qualification_audit", None)
+    if raw is None:
+        qualification = metadata.get("qualification")
+        if isinstance(qualification, Mapping):
+            raw = qualification.get("audit") or qualification.get("records")
+    if raw is None:
+        return []
+    if isinstance(raw, Mapping):
+        raw = raw.get("records") or raw.get("audit") or raw.get("items") or ()
+
+    records: list[dict[str, Any]] = []
+    for index, item in enumerate(raw if isinstance(raw, Sequence) and not isinstance(raw, str) else ()):
+        if not isinstance(item, Mapping):
+            continue
+        record = {str(key): _jsonable(value) for key, value in item.items()}
+        record.setdefault("audit_id", f"qualification_{index + 1:03d}")
+        record.setdefault("status", "accepted")
+        record.setdefault("tier", "unknown")
+        record["reasons"] = _audit_reasons(record)
+        records.append(record)
+    return records
+
+
+def _qualification_summary(
+    run: TieredResearchRun,
+    audit_records: Sequence[Mapping[str, Any]],
+    metadata: Mapping[str, Any],
+) -> dict[str, int]:
+    contacts_by_company: dict[str, int] = {}
+    for contact in run.contacts:
+        contacts_by_company[contact.company_id] = contacts_by_company.get(contact.company_id, 0) + 1
+
+    accepted_contact_ids = {
+        str(record.get("contact_id") or "")
+        for record in audit_records
+        if _audit_status(record) in {"accepted", "ready", "review_ready"}
+        and str(record.get("contact_id") or "")
+    }
+    needs_contact_companies = {
+        str(record.get("company_id") or record.get("company_name") or record.get("name") or "")
+        for record in audit_records
+        if _audit_status(record) == "needs_contact"
+    }
+
+    defaults = {
+        "ready_contact_count": len(accepted_contact_ids) if accepted_contact_ids else len(run.contacts),
+        "qualified_company_count": len(run.companies),
+        "needs_contact_count": (
+            len({item for item in needs_contact_companies if item})
+            if needs_contact_companies
+            else sum(1 for company in run.companies if contacts_by_company.get(company.company_id, 0) == 0)
+        ),
+        "rejected_candidate_count": sum(
+            1 for record in audit_records if _audit_status(record) == "rejected"
+        ),
+    }
+    return {
+        key: _metadata_count(metadata, key, default=value)
+        for key, value in defaults.items()
+    }
+
+
+def _metadata_count(metadata: Mapping[str, Any], key: str, *, default: int) -> int:
+    value = metadata.get(key)
+    if value in (None, ""):
+        counts = metadata.get("qualification_counts") or metadata.get("qualification_summary")
+        if isinstance(counts, Mapping):
+            value = counts.get(key)
+    if value in (None, ""):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _audit_status(record: Mapping[str, Any]) -> str:
+    return str(record.get("status") or "").strip().lower().replace("-", "_")
+
+
+def _audit_reasons(record: Mapping[str, Any]) -> list[str]:
+    raw = record.get("reasons") or record.get("reason_flags") or record.get("reason") or ()
+    if isinstance(raw, str):
+        return [raw] if raw else []
+    if isinstance(raw, Sequence):
+        return [str(item) for item in raw if str(item)]
+    return [str(raw)] if raw else []
+
+
 def _required(value: Mapping[str, Any], key: str) -> Any:
     item = value.get(key)
     if item in (None, ""):
