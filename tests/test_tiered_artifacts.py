@@ -109,13 +109,20 @@ def test_write_tiered_artifacts_emits_nested_json_csvs_and_markdown(tmp_path) ->
 
     payload = json.loads(result.json_path.read_text())
     assert payload["schema_version"] == TIERED_ARTIFACT_SCHEMA_VERSION
-    assert payload["metadata"] == {"story": "G001"}
+    assert payload["metadata"] == {
+        "story": "G001",
+        "ready_contact_count": 1,
+        "qualified_company_count": 1,
+        "needs_contact_count": 0,
+        "rejected_candidate_count": 0,
+    }
     assert payload["run_id"] == "demo-thread"
     assert payload["directive"]["industry"] == "orthodontics"
     assert payload["companies"][0]["company_id"] == "company_001"
     assert payload["contacts"][0]["company_id"] == "company_001"
     assert payload["personalization_signals"][0]["contact_id"] == "contact_001"
     assert payload["browser_captures"][0]["screenshot_path"] == "captures/cap_001.png"
+    assert payload["qualification_audit"] == []
 
     with result.companies_csv_path.open(newline="") as handle:
         company_rows = list(csv.DictReader(handle))
@@ -141,7 +148,59 @@ def test_write_tiered_artifacts_emits_nested_json_csvs_and_markdown(tmp_path) ->
     assert "##### Contact: Dr. Ada Lovelace, owner DDS" in markdown
     assert "Lead with teen Invisalign patient reactivation." in markdown
     assert "Do not claim patient volume." in markdown
+    assert "Ready contact rows: 1" in markdown
+    assert "Rejected/noisy candidates: 0" in markdown
     assert "## Warnings and Human Review Items" in markdown
+
+
+def test_write_tiered_artifacts_renders_additive_qualification_audit(tmp_path) -> None:
+    run = _sample_run()
+
+    result = write_tiered_artifacts(
+        run,
+        tmp_path,
+        metadata={
+            "qualification_audit": [
+                {
+                    "audit_id": "qa-needs-contact",
+                    "tier": "company",
+                    "status": "needs_contact",
+                    "company_id": "company_002",
+                    "company_name": "Beta Ortho",
+                    "source_title": "Beta Ortho official site",
+                    "source_url": "https://beta.example",
+                    "reasons": ["no_verified_contact"],
+                },
+                {
+                    "audit_id": "qa-rejected",
+                    "tier": "company",
+                    "status": "rejected",
+                    "source_title": "Best orthodontists in Dallas",
+                    "source_url": "https://directory.example/best",
+                    "reasons": ["listicle_or_directory"],
+                },
+            ],
+        },
+    )
+
+    payload = json.loads(result.json_path.read_text())
+    assert [record["status"] for record in payload["qualification_audit"]] == [
+        "needs_contact",
+        "rejected",
+    ]
+    assert payload["metadata"]["ready_contact_count"] == 1
+    assert payload["metadata"]["qualified_company_count"] == 1
+    assert payload["metadata"]["needs_contact_count"] == 1
+    assert payload["metadata"]["rejected_candidate_count"] == 1
+    assert "qualification_audit" not in payload["metadata"]
+
+    markdown = result.markdown_path.read_text()
+    assert "## Qualified companies needing contacts" in markdown
+    assert "Beta Ortho" in markdown
+    assert "no_verified_contact" in markdown
+    assert "## Rejected/noisy candidates" in markdown
+    assert "Best orthodontists in Dallas" in markdown
+    assert "listicle_or_directory" in markdown
 
 
 def test_build_tiered_payload_accepts_mapping_records() -> None:

@@ -630,6 +630,9 @@ def _write_csv(
 def _render_markdown_report(
     run: TieredResearchRun,
     final_enrichment: Sequence[FinalEnrichmentRecord],
+    *,
+    qualification_audit: Sequence[Mapping[str, Any]] = (),
+    qualification_summary: Mapping[str, int] | None = None,
 ) -> str:
     contacts_by_company: dict[str, list[ContactCandidate]] = {
         company.company_id: [] for company in run.companies
@@ -640,6 +643,7 @@ def _render_markdown_report(
     personalizations_by_contact = {
         personalization.contact_id: personalization for personalization in run.personalizations
     }
+    summary = dict(qualification_summary or {})
 
     lines = [
         "# Tiered Prospect Research Report",
@@ -659,6 +663,10 @@ def _render_markdown_report(
         f"{sum(len(item.personalization_signals) for item in run.personalizations)}",
         f"- Browser captures: {len(run.browser_captures)}",
         f"- Final enrichment records: {len(final_enrichment)}",
+        f"- Ready contact rows: {summary.get('ready_contact_count', len(run.contacts))}",
+        f"- Qualified companies: {summary.get('qualified_company_count', len(run.companies))}",
+        f"- Qualified companies needing contacts: {summary.get('needs_contact_count', 0)}",
+        f"- Rejected/noisy candidates: {summary.get('rejected_candidate_count', 0)}",
         "",
         "## Qualified Companies",
     ]
@@ -699,7 +707,21 @@ def _render_markdown_report(
                     lines.append(
                         f"  - Do not claim: "
                         f"{_escape_markdown('; '.join(personalization.do_not_claim))}"
-                    )
+            )
+
+    needs_contact_records = [
+        record for record in qualification_audit if _audit_status(record) == "needs_contact"
+    ]
+    if needs_contact_records:
+        lines.extend(["", "## Qualified companies needing contacts", ""])
+        lines.extend(_render_audit_record(record) for record in needs_contact_records)
+
+    rejected_records = [
+        record for record in qualification_audit if _audit_status(record) == "rejected"
+    ]
+    if rejected_records:
+        lines.extend(["", "## Rejected/noisy candidates", ""])
+        lines.extend(_render_audit_record(record) for record in rejected_records)
 
     if final_enrichment:
         lines.extend(["", "## Final Enrichment", ""])
@@ -715,6 +737,30 @@ def _render_markdown_report(
         lines.extend(f"- {_escape_markdown(warning)}" for warning in run.warnings)
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_audit_record(record: Mapping[str, Any]) -> str:
+    label = (
+        record.get("company_name")
+        or record.get("contact_name")
+        or record.get("name")
+        or record.get("source_title")
+        or record.get("title")
+        or record.get("audit_id")
+        or "candidate"
+    )
+    source_url = str(record.get("source_url") or record.get("url") or "").strip()
+    reasons = "; ".join(_audit_reasons(record))
+    parts = [
+        f"- **{_escape_markdown(label)}**",
+        f"status={_escape_markdown(_audit_status(record) or 'unknown')}",
+        f"tier={_escape_markdown(record.get('tier') or 'unknown')}",
+    ]
+    if source_url:
+        parts.append(f"source={source_url}")
+    if reasons:
+        parts.append(f"reasons={_escape_markdown(reasons)}")
+    return " — ".join(parts)
 
 
 def _escape_markdown(value: Any) -> str:

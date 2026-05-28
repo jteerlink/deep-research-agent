@@ -22,6 +22,8 @@ from deep_research_agent.ui import (
     preview_geography_scope,
     provider_env_from_env_file,
     provider_env_overlay,
+    qualification_audit_rows,
+    qualification_summary,
     result_preview,
     selection_from_prospect_rows,
     temporary_env,
@@ -204,6 +206,11 @@ def test_tiered_review_state_distinguishes_ready_and_empty_review(tmp_path) -> N
     assert tiered_review_state(ready) == {
         "status": "review_required",
         "prospect_count": 2,
+        "ready_prospect_count": 2,
+        "ready_contact_count": 2,
+        "qualified_company_count": 2,
+        "needs_contact_count": 0,
+        "rejected_candidate_count": 0,
         "enrichment_count": 0,
         "review_ready": True,
         "empty_review": False,
@@ -211,10 +218,109 @@ def test_tiered_review_state_distinguishes_ready_and_empty_review(tmp_path) -> N
     assert tiered_review_state(empty) == {
         "status": "review_required",
         "prospect_count": 0,
+        "ready_prospect_count": 0,
+        "ready_contact_count": 0,
+        "qualified_company_count": 0,
+        "needs_contact_count": 0,
+        "rejected_candidate_count": 0,
         "enrichment_count": 0,
         "review_ready": False,
         "empty_review": True,
     }
+
+
+def test_tiered_review_state_counts_ready_needs_contact_and_rejected() -> None:
+    payload = {
+        "status": "review_required",
+        "companies": [
+            {"company_id": "company_ready", "name": "Ready Dental", "website": "https://ready.example"},
+            {"company_id": "company_needs", "name": "Needs Contact Dental"},
+        ],
+        "contacts": [
+            {
+                "company_id": "company_ready",
+                "contact_id": "contact_ready",
+                "name": "Jane Smith",
+                "title": "Owner",
+                "contact_confidence": 0.86,
+            },
+            {
+                "company_id": "company_needs",
+                "contact_id": "contact_placeholder",
+                "name": "Review Contact at Needs Contact Dental",
+                "title": "review contact",
+                "contact_confidence": 0.2,
+            },
+        ],
+        "qualification_audit": [
+            {
+                "tier": "contact",
+                "status": "accepted",
+                "company_id": "company_ready",
+                "contact_id": "contact_ready",
+                "company_name": "Ready Dental",
+                "contact_name": "Jane Smith",
+            },
+            {
+                "tier": "company",
+                "status": "needs_contact",
+                "company_id": "company_needs",
+                "company_name": "Needs Contact Dental",
+                "reasons": ["no_verified_contact"],
+            },
+            {
+                "tier": "company",
+                "status": "rejected",
+                "source_title": "Best dental practices in Dallas",
+                "source_url": "https://directory.example/best",
+                "reasons": ["listicle_or_directory"],
+            },
+        ],
+    }
+
+    rows = flatten_tiered_prospect_rows(
+        payload,
+        selected_row_ids={"company_ready::contact_ready", "company_needs::contact_placeholder"},
+    )
+
+    assert rows == [
+        {
+            "selected": True,
+            "selectable": True,
+            "row_id": "company_ready::contact_ready",
+            "company_id": "company_ready",
+            "contact_id": "contact_ready",
+            "company_name": "Ready Dental",
+            "website": "https://ready.example",
+            "fit_score": "",
+            "contact_name": "Jane Smith",
+            "contact_title": "Owner",
+            "contact_confidence": 0.86,
+            "personalization_summary": "",
+        }
+    ]
+    assert qualification_summary(payload) == {
+        "ready_contact_count": 1,
+        "qualified_company_count": 2,
+        "needs_contact_count": 1,
+        "rejected_candidate_count": 1,
+    }
+    assert tiered_review_state(payload) == {
+        "status": "review_required",
+        "prospect_count": 1,
+        "ready_prospect_count": 1,
+        "ready_contact_count": 1,
+        "qualified_company_count": 2,
+        "needs_contact_count": 1,
+        "rejected_candidate_count": 1,
+        "enrichment_count": 0,
+        "review_ready": True,
+        "empty_review": False,
+    }
+    audit_rows = qualification_audit_rows(payload)
+    assert [row["status"] for row in audit_rows] == ["needs_contact", "rejected"]
+    assert all(row["selectable"] is False for row in audit_rows)
+    assert audit_rows[0]["reasons"] == "no_verified_contact"
 
 
 def test_selected_prospect_rows_build_approval_for_checked_pairs(tmp_path) -> None:

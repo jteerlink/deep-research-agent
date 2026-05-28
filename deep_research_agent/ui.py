@@ -249,6 +249,13 @@ def flatten_tiered_prospect_rows(
 
     payload = _tiered_payload(checkpoint)
     selected = set(selected_row_ids)
+    audit_records = qualification_audit_rows(payload, include_statuses=("accepted", "ready", "review_ready"))
+    accepted_contact_ids = {
+        str(record.get("contact_id") or "")
+        for record in audit_records
+        if str(record.get("contact_id") or "")
+    }
+    has_audit = bool(_qualification_audit(payload))
     companies = {
         str(company.get("company_id")): company
         for company in payload.get("companies") or ()
@@ -263,11 +270,16 @@ def flatten_tiered_prospect_rows(
         contact_id = str(contact.get("contact_id") or "")
         if not company_id or not contact_id or company_id not in companies:
             continue
+        if accepted_contact_ids and contact_id not in accepted_contact_ids:
+            continue
+        if has_audit and _is_placeholder_contact(contact):
+            continue
         company = companies[company_id]
         row_id = _prospect_row_id(company_id, contact_id)
         rows.append(
             {
                 "selected": row_id in selected,
+                "selectable": True,
                 "row_id": row_id,
                 "company_id": company_id,
                 "contact_id": contact_id,
@@ -292,7 +304,11 @@ def selection_from_prospect_rows(
 ) -> ApprovedProspectSelection:
     """Build an approval payload from checked contact-level prospect rows."""
 
-    selected_rows = [row for row in _iter_row_records(rows) if bool(row.get("selected"))]
+    selected_rows = [
+        row
+        for row in _iter_row_records(rows)
+        if bool(row.get("selected")) and row.get("selectable", True) is not False
+    ]
     if not selected_rows:
         raise ValueError("Select at least one prospect before final enrichment.")
 
@@ -422,9 +438,15 @@ def tiered_review_state(
     payload = _tiered_payload(checkpoint)
     prospect_count = len(flatten_tiered_prospect_rows(payload))
     enrichment_count = len(flatten_enriched_prospect_rows(payload))
+    qualification = qualification_summary(payload, ready_contact_count=prospect_count)
     return {
         "status": str(payload.get("status") or ""),
         "prospect_count": prospect_count,
+        "ready_prospect_count": qualification["ready_contact_count"],
+        "ready_contact_count": qualification["ready_contact_count"],
+        "qualified_company_count": qualification["qualified_company_count"],
+        "needs_contact_count": qualification["needs_contact_count"],
+        "rejected_candidate_count": qualification["rejected_candidate_count"],
         "enrichment_count": enrichment_count,
         "review_ready": str(payload.get("status") or "") == "review_required"
         and prospect_count > 0,
@@ -433,12 +455,184 @@ def tiered_review_state(
     }
 
 
+def qualification_summary(
+    checkpoint: TieredCheckpoint | Mapping[str, Any] | None,
+    *,
+    ready_contact_count: int | None = None,
+) -> dict[str, int]:
+    """Return additive qualification counts from checkpoint/artifact payloads."""
+
+    payload = _tiered_payload(checkpoint)
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
+    audit = _qualification_audit(payload)
+    companies = [
+        company for company in payload.get("companies") or () if isinstance(company, Mapping)
+    ]
+    contacts = [
+        contact for contact in payload.get("contacts") or () if isinstance(contact, Mapping)
+    ]
+    contact_company_ids = {
+        str(contact.get("company_id") or "")
+        for contact in contacts
+        if str(contact.get("company_id") or "")
+    }
+    needs_contact_from_audit = {
+        str(record.get("company_id") or record.get("company_name") or record.get("name") or "")
+        for record in audit
+        if _audit_status(record) == "needs_contact"
+    }
+    accepted_contact_ids = {
+        str(record.get("contact_id") or "")
+        for record in audit
+        if _audit_status(record) in {"accepted", "ready", "review_ready"}
+        and str(record.get("contact_id") or "")
+    }
+    defaults = {
+        "ready_contact_count": (
+            ready_contact_count
+            if ready_contact_count is not None
+            else (len(accepted_contact_ids) if accepted_contact_ids else len(contacts))
+        ),
+        "qualified_company_count": len(companies),
+        "needs_contact_count": (
+            len({item for item in needs_contact_from_audit if item})
+            if needs_contact_from_audit
+            else sum(
+                1
+                for company in companies
+                if str(company.get("company_id") or "") not in contact_company_ids
+            )
+        ),
+        "rejected_candidate_count": sum(1 for record in audit if _audit_status(record) == "rejected"),
+    }
+    return {
+        key: _payload_count(payload, metadata, key, default=value)
+        for key, value in defaults.items()
+    }
+
+
+def qualification_audit_rows(
+    checkpoint: TieredCheckpoint | Mapping[str, Any] | None,
+    *,
+    include_statuses: tuple[str, ...] = ("needs_contact", "rejected"),
+) -> list[dict[str, Any]]:
+    """Flatten qualification audit records into non-selectable UI table rows."""
+
+    payload = _tiered_payload(checkpoint)
+    statuses = {status.lower().replace("-", "_") for status in include_statuses}
+    rows: list[dict[str, Any]] = []
+    for record in _qualification_audit(payload):
+        status = _audit_status(record)
+        if statuses and status not in statuses:
+            continue
+        rows.append(
+            {
+                "selectable": False,
+                "status": status,
+                "tier": str(record.get("tier") or ""),
+                "company_id": str(record.get("company_id") or ""),
+                "contact_id": str(record.get("contact_id") or ""),
+                "company_name": str(record.get("company_name") or record.get("name") or ""),
+                "contact_name": str(record.get("contact_name") or ""),
+                "source_title": str(record.get("source_title") or record.get("title") or ""),
+                "source_url": str(record.get("source_url") or record.get("url") or ""),
+                "reasons": "; ".join(_audit_reasons(record)),
+            }
+        )
+
+    if not rows and "needs_contact" in statuses:
+        contact_company_ids = {
+            str(contact.get("company_id") or "")
+            for contact in payload.get("contacts") or ()
+            if isinstance(contact, Mapping) and str(contact.get("company_id") or "")
+        }
+        for company in payload.get("companies") or ():
+            if not isinstance(company, Mapping):
+                continue
+            company_id = str(company.get("company_id") or "")
+            if company_id and company_id not in contact_company_ids:
+                rows.append(
+                    {
+                        "selectable": False,
+                        "status": "needs_contact",
+                        "tier": "company",
+                        "company_id": company_id,
+                        "contact_id": "",
+                        "company_name": str(company.get("name") or ""),
+                        "contact_name": "",
+                        "source_title": "Qualified company has no verified contact",
+                        "source_url": str(company.get("website") or ""),
+                        "reasons": "no_verified_contact",
+                    }
+                )
+    return rows
+
+
 def _tiered_payload(checkpoint: TieredCheckpoint | Mapping[str, Any] | None) -> dict[str, Any]:
     if checkpoint is None:
         return {}
     if isinstance(checkpoint, Mapping):
         return dict(checkpoint)
     return checkpoint.to_dict()
+
+
+def _qualification_audit(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    raw: Any = payload.get("qualification_audit")
+    metadata = payload.get("metadata")
+    if raw is None and isinstance(metadata, Mapping):
+        raw = metadata.get("qualification_audit")
+        qualification = metadata.get("qualification")
+        if raw is None and isinstance(qualification, Mapping):
+            raw = qualification.get("audit") or qualification.get("records")
+    if isinstance(raw, Mapping):
+        raw = raw.get("records") or raw.get("audit") or raw.get("items")
+    if not isinstance(raw, Iterable) or isinstance(raw, (str, bytes)):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, Mapping):
+            rows.append(dict(item))
+    return rows
+
+
+def _audit_status(record: Mapping[str, Any]) -> str:
+    return str(record.get("status") or "").strip().lower().replace("-", "_")
+
+
+def _audit_reasons(record: Mapping[str, Any]) -> list[str]:
+    raw = record.get("reasons") or record.get("reason_flags") or record.get("reason") or ()
+    if isinstance(raw, str):
+        return [raw] if raw else []
+    if isinstance(raw, Iterable):
+        return [str(item) for item in raw if str(item)]
+    return [str(raw)] if raw else []
+
+
+def _payload_count(
+    payload: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    key: str,
+    *,
+    default: int,
+) -> int:
+    value = payload.get(key)
+    if value in (None, ""):
+        value = metadata.get(key)
+    if value in (None, ""):
+        counts = payload.get("qualification_counts") or metadata.get("qualification_counts")
+        if isinstance(counts, Mapping):
+            value = counts.get(key)
+    if value in (None, ""):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_placeholder_contact(contact: Mapping[str, Any]) -> bool:
+    name = str(contact.get("name") or "").strip().casefold()
+    return name.startswith("review contact at ")
 
 
 def _personalization_summaries(payload: Mapping[str, Any]) -> dict[str, str]:
@@ -888,9 +1082,21 @@ def render_app() -> None:
     if tiered_state:
         review_state = tiered_review_state(tiered_state)
         if review_state["review_ready"]:
-            st.info(f"{review_state['prospect_count']} prospect row(s) ready for review.")
+            st.info(
+                f"{review_state['ready_prospect_count']} ready prospect row(s); "
+                f"{review_state['needs_contact_count']} qualified compan"
+                f"{'y' if review_state['needs_contact_count'] == 1 else 'ies'} "
+                "need contact discovery; "
+                f"{review_state['rejected_candidate_count']} rejected/noisy candidate(s)."
+            )
         elif review_state["empty_review"]:
-            st.warning("No contact-level prospect rows were generated for this tiered run.")
+            st.warning(
+                "No contact-level prospect rows were generated for this tiered run. "
+                f"{review_state['needs_contact_count']} qualified compan"
+                f"{'y' if review_state['needs_contact_count'] == 1 else 'ies'} "
+                "need contact discovery; "
+                f"{review_state['rejected_candidate_count']} rejected/noisy candidate(s)."
+            )
 
     tabs = st.tabs(
         [
@@ -995,6 +1201,10 @@ def render_app() -> None:
                         st.rerun()
             else:
                 st.info("No contact-level prospect rows are available in this tiered checkpoint.")
+            audit_rows = qualification_audit_rows(tiered_state)
+            if audit_rows:
+                with st.expander("Qualification audit: needs contact and rejected/noisy candidates"):
+                    st.dataframe(audit_rows, width="stretch")
         else:
             st.dataframe(preview["prospect_targets"], width="stretch")
     with tabs[1]:
