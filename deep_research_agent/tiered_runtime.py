@@ -57,7 +57,8 @@ DEFAULT_TIERED_CHECKPOINT_DIR = ".deep_research_agent/tiered_checkpoints"
 DEFAULT_TIERED_ARTIFACT_DIR = ".deep_research_agent/tiered_artifacts"
 _THREAD_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 LIVE_COMPANY_OVERSAMPLE_FACTOR = 4
-LIVE_CONTACT_COMPANY_POOL_FACTOR = 3
+LIVE_COMPANY_DISCOVERY_POOL_FACTOR = 3
+LIVE_CONTACTS_PER_COMPANY = 2
 MAX_LIVE_COMPANY_CANDIDATES = 50
 FinalEnrichmentFactory = Callable[
     [TieredResearchRun, ApprovedProspectSelection],
@@ -215,11 +216,10 @@ async def run_tiered_research_with_search(
         search=search,
         provider_policy=policy,
     )
-    company_pool_target = _company_pool_target(directive, company_result_cap)
     company_qualification = qualify_company_hits(
         company_batch.hits,
         directive,
-        target_count=company_pool_target,
+        target_count=directive.target_prospect_count,
         oversample_factor=LIVE_COMPANY_OVERSAMPLE_FACTOR,
     )
     company_audit = _company_audit_payloads(company_qualification)
@@ -242,12 +242,11 @@ async def run_tiered_research_with_search(
             provider_policy=policy,
         )
         contact_failures += len(contact_batch.failures)
-        remaining_contact_slots = max(directive.target_prospect_count - len(contacts), 1)
         contact_qualification = qualify_contact_hits(
             contact_batch.hits,
             company,
             directive,
-            max_contacts=remaining_contact_slots,
+            max_contacts=LIVE_CONTACTS_PER_COMPANY,
         )
         company_contacts = [
             candidate.to_contact_candidate()
@@ -257,8 +256,6 @@ async def run_tiered_research_with_search(
         contact_audit.extend(
             _contact_audit_payloads(contact_qualification, company)
         )
-        if len(contacts) >= directive.target_prospect_count:
-            break
 
     qualification_audit = [*company_audit, *contact_audit]
     personalizations = _personalizations_for_contacts(
@@ -311,7 +308,8 @@ async def run_tiered_research_with_search(
             ),
             _event(
                 "review_required",
-                f"{len(contacts)} contact-level prospect row(s) ready for review",
+                f"{len(companies)} company prospect row(s) ready for review",
+                ready_company_count=len(companies),
                 ready_contact_count=len(contacts),
                 needs_contact_count=qualification_counts["needs_contact_count"],
             ),
@@ -550,20 +548,10 @@ def _company_candidate_result_cap(directive: SearchDirective, max_results: int) 
     requested_pool = max(
         max_results,
         directive.target_prospect_count
-        * LIVE_CONTACT_COMPANY_POOL_FACTOR
+        * LIVE_COMPANY_DISCOVERY_POOL_FACTOR
         * LIVE_COMPANY_OVERSAMPLE_FACTOR,
     )
     return min(MAX_LIVE_COMPANY_CANDIDATES, requested_pool)
-
-
-def _company_pool_target(directive: SearchDirective, company_result_cap: int) -> int:
-    return min(
-        company_result_cap,
-        max(
-            directive.target_prospect_count,
-            directive.target_prospect_count * LIVE_CONTACT_COMPANY_POOL_FACTOR,
-        ),
-    )
 
 
 def _company_audit_payloads(batch: QualifiedCompanyBatch) -> list[dict[str, Any]]:
@@ -631,9 +619,14 @@ def _qualification_counts(
     contacts: Sequence[ContactCandidate],
     qualification_audit: Sequence[dict[str, Any]],
 ) -> dict[str, int]:
+    companies_with_contacts = {contact.company_id for contact in contacts}
     return {
+        "ready_company_count": len(companies),
+        "company_prospect_count": len(companies),
         "ready_contact_count": len(contacts),
+        "contact_candidate_count": len(contacts),
         "qualified_company_count": len(companies),
+        "companies_with_contacts_count": len(companies_with_contacts),
         "needs_contact_count": _count_audit_status(qualification_audit, "needs_contact"),
         "rejected_candidate_count": _count_audit_status(qualification_audit, "rejected"),
     }
@@ -647,8 +640,12 @@ def _qualification_counts_from_payload(payload: Any) -> dict[str, int]:
         counts = payload
     parsed: dict[str, int] = {}
     for key in (
+        "ready_company_count",
+        "company_prospect_count",
         "ready_contact_count",
+        "contact_candidate_count",
         "qualified_company_count",
+        "companies_with_contacts_count",
         "needs_contact_count",
         "rejected_candidate_count",
     ):
@@ -753,7 +750,7 @@ def _live_search_warnings(
         warnings.append(f"Contact discovery had {contact_failures} failed search query/queries.")
     if needs_contact_count:
         warnings.append(
-            f"{needs_contact_count} qualified company/company(s) still need verified contacts."
+            f"{needs_contact_count} qualified company prospect(s) still need verified contacts."
         )
     if rejected_candidate_count:
         warnings.append(

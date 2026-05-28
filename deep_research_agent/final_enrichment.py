@@ -28,11 +28,10 @@ async def enrich_selected_prospects(
     if max_results < 1:
         raise ValueError("max_results must be >= 1")
 
-    selected_contacts = _approved_contact_pairs(run, approval)
+    selected_targets = _approved_enrichment_targets(run, approval)
     records: list[FinalEnrichmentRecord] = []
-    for index, contact in enumerate(selected_contacts, start=1):
-        company = _companies_by_id(run)[contact.company_id]
-        query = _final_enrichment_query(run, contact)
+    for index, (company, contact) in enumerate(selected_targets, start=1):
+        query = _final_enrichment_query(run, company, contact)
         raw_results = await search(query, max_results)
         results = tuple(_coerce_search_result(result) for result in raw_results)
         non_exa_providers = sorted(
@@ -56,11 +55,11 @@ async def enrich_selected_prospects(
         records.append(
             FinalEnrichmentRecord(
                 enrichment_id=(
-                    f"final_exa_{index:03d}_{_slug(contact.company_id)}_"
-                    f"{_slug(contact.contact_id)}"
+                    f"final_exa_{index:03d}_{_slug(company.company_id)}_"
+                    f"{_slug(contact.contact_id) if contact else 'company'}"
                 ),
-                company_id=contact.company_id,
-                contact_id=contact.contact_id,
+                company_id=company.company_id,
+                contact_id=contact.contact_id if contact else "",
                 summary=_final_enrichment_summary(
                     company_name=company.name,
                     contact=contact,
@@ -74,37 +73,53 @@ async def enrich_selected_prospects(
     return tuple(records)
 
 
-def _approved_contact_pairs(
+def _approved_enrichment_targets(
     run: TieredResearchRun,
     approval: ApprovedProspectSelection,
-) -> tuple[ContactCandidate, ...]:
+) -> tuple[tuple[CompanyProspect, ContactCandidate | None], ...]:
+    companies_by_id = _companies_by_id(run)
     approved_companies = set(approval.approved_company_ids)
     approved_contacts = set(approval.approved_contact_ids)
-    contacts = tuple(
+    contacts_by_id = {contact.contact_id: contact for contact in run.contacts}
+    contacts = [
         contact
         for contact in run.contacts
         if contact.contact_id in approved_contacts and contact.company_id in approved_companies
-    )
-    missing_contacts = approved_contacts - {contact.contact_id for contact in contacts}
+    ]
+    missing_contacts = approved_contacts - set(contacts_by_id)
     if missing_contacts:
         raise ValueError(f"approved contact_id not found in approved company: {missing_contacts}")
-    return contacts
+    targets: list[tuple[CompanyProspect, ContactCandidate | None]] = []
+    contacts_by_company: dict[str, list[ContactCandidate]] = {}
+    for contact in contacts:
+        contacts_by_company.setdefault(contact.company_id, []).append(contact)
+    for company_id in approval.approved_company_ids:
+        company = companies_by_id[company_id]
+        company_contacts = contacts_by_company.get(company_id)
+        if company_contacts:
+            targets.extend((company, contact) for contact in company_contacts)
+        else:
+            targets.append((company, None))
+    return tuple(targets)
 
 
 def _companies_by_id(run: TieredResearchRun) -> dict[str, CompanyProspect]:
     return {company.company_id: company for company in run.companies}
 
 
-def _final_enrichment_query(run: TieredResearchRun, contact: ContactCandidate) -> str:
-    company = _companies_by_id(run)[contact.company_id]
+def _final_enrichment_query(
+    run: TieredResearchRun,
+    company: CompanyProspect,
+    contact: ContactCandidate | None,
+) -> str:
     parts = [
-        contact.name,
         company.name,
-        contact.title,
         run.directive.industry,
         run.directive.geographic_area,
         "recent news leadership business context",
     ]
+    if contact is not None:
+        parts[:0] = [contact.name, contact.title]
     if company.website:
         parts.append(company.website)
     return " ".join(part.strip() for part in parts if part.strip())
@@ -135,11 +150,12 @@ def _coerce_search_result(raw: Any) -> dict[str, Any]:
 def _final_enrichment_summary(
     *,
     company_name: str,
-    contact: ContactCandidate,
+    contact: ContactCandidate | None,
     results: Sequence[dict[str, Any]],
 ) -> str:
+    subject = f"{contact.name} at {company_name}" if contact else company_name
     if not results:
-        return f"Exa found no final enrichment results for {contact.name} at {company_name}."
+        return f"Exa found no final enrichment results for {subject}."
 
     excerpts = []
     for result in results[:3]:
@@ -153,7 +169,7 @@ def _final_enrichment_summary(
         if content:
             excerpt += f": {content}"
         excerpts.append(excerpt)
-    return f"Exa final enrichment for {contact.name} at {company_name}: " + " | ".join(excerpts)
+    return f"Exa final enrichment for {subject}: " + " | ".join(excerpts)
 
 
 def _slug(value: str) -> str:

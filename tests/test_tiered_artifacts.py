@@ -111,8 +111,12 @@ def test_write_tiered_artifacts_emits_nested_json_csvs_and_markdown(tmp_path) ->
     assert payload["schema_version"] == TIERED_ARTIFACT_SCHEMA_VERSION
     assert payload["metadata"] == {
         "story": "G001",
+        "ready_company_count": 1,
+        "company_prospect_count": 1,
         "ready_contact_count": 1,
+        "contact_candidate_count": 1,
         "qualified_company_count": 1,
+        "companies_with_contacts_count": 1,
         "needs_contact_count": 0,
         "rejected_candidate_count": 0,
     }
@@ -148,7 +152,8 @@ def test_write_tiered_artifacts_emits_nested_json_csvs_and_markdown(tmp_path) ->
     assert "##### Contact: Dr. Ada Lovelace, owner DDS" in markdown
     assert "Lead with teen Invisalign patient reactivation." in markdown
     assert "Do not claim patient volume." in markdown
-    assert "Ready contact rows: 1" in markdown
+    assert "Company prospects: 1" in markdown
+    assert "Contact candidates: 1" in markdown
     assert "Rejected/noisy candidates: 0" in markdown
     assert "## Warnings and Human Review Items" in markdown
 

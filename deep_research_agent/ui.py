@@ -245,7 +245,11 @@ def flatten_tiered_prospect_rows(
     *,
     selected_row_ids: Iterable[str] = (),
 ) -> list[dict[str, Any]]:
-    """Flatten a tiered checkpoint into contact-level selectable prospect rows."""
+    """Flatten a tiered checkpoint into company-level selectable prospect rows.
+
+    Company prospects are the primary review unit. Contacts remain attached
+    child evidence, with zero, one, or a small number of candidates per company.
+    """
 
     payload = _tiered_payload(checkpoint)
     selected = set(selected_row_ids)
@@ -265,7 +269,9 @@ def flatten_tiered_prospect_rows(
         if isinstance(company, Mapping)
     }
     personalizations = _personalization_summaries(payload)
-    rows: list[dict[str, Any]] = []
+    contacts_by_company: dict[str, list[Mapping[str, Any]]] = {
+        company_id: [] for company_id in companies
+    }
     for contact in payload.get("contacts") or ():
         if not isinstance(contact, Mapping):
             continue
@@ -277,22 +283,53 @@ def flatten_tiered_prospect_rows(
             continue
         if has_audit and _is_placeholder_contact(contact):
             continue
+        contacts_by_company.setdefault(company_id, []).append(contact)
+
+    rows: list[dict[str, Any]] = []
+    for company_id, company in companies.items():
+        company_contacts = contacts_by_company.get(company_id, [])
+        contact_ids = [
+            str(contact.get("contact_id") or "")
+            for contact in company_contacts
+            if str(contact.get("contact_id") or "")
+        ]
+        primary_contact = company_contacts[0] if company_contacts else {}
+        contact_summaries = [
+            ", ".join(
+                part
+                for part in (
+                    str(contact.get("name") or ""),
+                    str(contact.get("title") or ""),
+                )
+                if part
+            )
+            for contact in company_contacts
+        ]
+        personalization_summary = "; ".join(
+            personalizations.get(contact_id, "")
+            for contact_id in contact_ids
+            if personalizations.get(contact_id, "")
+        )
         company = companies[company_id]
-        row_id = _prospect_row_id(company_id, contact_id)
+        row_id = company_id
         rows.append(
             {
                 "selected": row_id in selected,
                 "selectable": True,
+                "row_type": "company",
                 "row_id": row_id,
                 "company_id": company_id,
-                "contact_id": contact_id,
+                "contact_id": str(primary_contact.get("contact_id") or ""),
+                "contact_ids": contact_ids,
                 "company_name": str(company.get("name") or ""),
                 "website": str(company.get("website") or ""),
                 "fit_score": company.get("fit_score", ""),
-                "contact_name": str(contact.get("name") or ""),
-                "contact_title": str(contact.get("title") or ""),
-                "contact_confidence": contact.get("contact_confidence", ""),
-                "personalization_summary": personalizations.get(contact_id, ""),
+                "contact_count": len(company_contacts),
+                "contact_names": "; ".join(contact_summaries),
+                "contact_name": str(primary_contact.get("name") or ""),
+                "contact_title": str(primary_contact.get("title") or ""),
+                "contact_confidence": primary_contact.get("contact_confidence", ""),
+                "personalization_summary": personalization_summary,
             }
         )
     return rows
@@ -305,7 +342,7 @@ def selection_from_prospect_rows(
     approved_at: str | None = None,
     notes: str = "",
 ) -> ApprovedProspectSelection:
-    """Build an approval payload from checked contact-level prospect rows."""
+    """Build an approval payload from checked company-level prospect rows."""
 
     selected_rows = [
         row
@@ -316,9 +353,22 @@ def selection_from_prospect_rows(
         raise ValueError("Select at least one prospect before final enrichment.")
 
     company_ids = _dedupe_preserve_order(str(row.get("company_id") or "") for row in selected_rows)
-    contact_ids = _dedupe_preserve_order(str(row.get("contact_id") or "") for row in selected_rows)
-    if not company_ids or not contact_ids:
-        raise ValueError("Selected prospect rows must include company and contact IDs.")
+    contact_values: list[str] = []
+    for row in selected_rows:
+        raw_contact_ids = row.get("contact_ids")
+        if isinstance(raw_contact_ids, str):
+            contact_values.extend(
+                item.strip() for item in raw_contact_ids.split(";") if item.strip()
+            )
+        elif isinstance(raw_contact_ids, Iterable):
+            contact_values.extend(str(item) for item in raw_contact_ids if str(item))
+        else:
+            contact_id = str(row.get("contact_id") or "")
+            if contact_id:
+                contact_values.append(contact_id)
+    contact_ids = _dedupe_preserve_order(contact_values)
+    if not company_ids:
+        raise ValueError("Selected prospect rows must include company IDs.")
 
     return ApprovedProspectSelection(
         approved_company_ids=company_ids,
@@ -441,13 +491,17 @@ def tiered_review_state(
     payload = _tiered_payload(checkpoint)
     prospect_count = len(flatten_tiered_prospect_rows(payload))
     enrichment_count = len(flatten_enriched_prospect_rows(payload))
-    qualification = qualification_summary(payload, ready_contact_count=prospect_count)
+    qualification = qualification_summary(payload, ready_company_count=prospect_count)
     return {
         "status": str(payload.get("status") or ""),
         "prospect_count": prospect_count,
-        "ready_prospect_count": qualification["ready_contact_count"],
+        "ready_prospect_count": qualification["ready_company_count"],
+        "ready_company_count": qualification["ready_company_count"],
+        "company_prospect_count": qualification["company_prospect_count"],
         "ready_contact_count": qualification["ready_contact_count"],
+        "contact_candidate_count": qualification["contact_candidate_count"],
         "qualified_company_count": qualification["qualified_company_count"],
+        "companies_with_contacts_count": qualification["companies_with_contacts_count"],
         "needs_contact_count": qualification["needs_contact_count"],
         "rejected_candidate_count": qualification["rejected_candidate_count"],
         "enrichment_count": enrichment_count,
@@ -461,6 +515,7 @@ def tiered_review_state(
 def qualification_summary(
     checkpoint: TieredCheckpoint | Mapping[str, Any] | None,
     *,
+    ready_company_count: int | None = None,
     ready_contact_count: int | None = None,
 ) -> dict[str, int]:
     """Return additive qualification counts from checkpoint/artifact payloads."""
@@ -493,20 +548,35 @@ def qualification_summary(
         if _audit_status(record) in {"accepted", "ready", "review_ready"}
         and str(record.get("contact_id") or "")
     }
+    accepted_contact_company_ids = {
+        str(record.get("company_id") or "")
+        for record in audit
+        if _audit_status(record) in {"accepted", "ready", "review_ready"}
+        and str(record.get("company_id") or "")
+    }
+    companies_with_contacts = accepted_contact_company_ids or contact_company_ids
     defaults = {
+        "ready_company_count": (
+            ready_company_count
+            if ready_company_count is not None
+            else len(companies)
+        ),
+        "company_prospect_count": len(companies),
         "ready_contact_count": (
             ready_contact_count
             if ready_contact_count is not None
             else (len(accepted_contact_ids) if accepted_contact_ids else len(contacts))
         ),
+        "contact_candidate_count": len(contacts),
         "qualified_company_count": len(companies),
+        "companies_with_contacts_count": len(companies_with_contacts),
         "needs_contact_count": (
             len({item for item in needs_contact_from_audit if item})
             if needs_contact_from_audit
             else sum(
                 1
                 for company in companies
-                if str(company.get("company_id") or "") not in contact_company_ids
+                if str(company.get("company_id") or "") not in companies_with_contacts
             )
         ),
         "rejected_candidate_count": sum(
@@ -1091,7 +1161,8 @@ def render_app() -> None:
         review_state = tiered_review_state(tiered_state)
         if review_state["review_ready"]:
             st.info(
-                f"{review_state['ready_prospect_count']} ready prospect row(s); "
+                f"{review_state['ready_prospect_count']} company prospect row(s); "
+                f"{review_state['contact_candidate_count']} contact candidate(s); "
                 f"{review_state['needs_contact_count']} qualified compan"
                 f"{'y' if review_state['needs_contact_count'] == 1 else 'ies'} "
                 "need contact discovery; "
@@ -1099,7 +1170,7 @@ def render_app() -> None:
             )
         elif review_state["empty_review"]:
             st.warning(
-                "No contact-level prospect rows were generated for this tiered run. "
+                "No company prospect rows were generated for this tiered run. "
                 f"{review_state['needs_contact_count']} qualified compan"
                 f"{'y' if review_state['needs_contact_count'] == 1 else 'ies'} "
                 "need contact discovery; "
@@ -1137,18 +1208,20 @@ def render_app() -> None:
                         "company_name",
                         "website",
                         "fit_score",
-                        "contact_name",
-                        "contact_title",
-                        "contact_confidence",
+                        "contact_count",
+                        "contact_names",
                         "personalization_summary",
                     ),
                     disabled=[
                         "row_id",
                         "company_id",
                         "contact_id",
+                        "contact_ids",
                         "company_name",
                         "website",
                         "fit_score",
+                        "contact_count",
+                        "contact_names",
                         "contact_name",
                         "contact_title",
                         "contact_confidence",
@@ -1208,7 +1281,7 @@ def render_app() -> None:
                         )
                         st.rerun()
             else:
-                st.info("No contact-level prospect rows are available in this tiered checkpoint.")
+                st.info("No company prospect rows are available in this tiered checkpoint.")
             audit_rows = qualification_audit_rows(tiered_state)
             if audit_rows:
                 with st.expander(

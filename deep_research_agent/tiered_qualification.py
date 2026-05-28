@@ -534,6 +534,8 @@ def _contact_tied_to_company(
     company_domain = _company_domain(company)
     if company_domain and company_domain in domain:
         return True
+    if _is_short_acronym(company.name):
+        return False
     if company_domain and company_domain in text:
         return True
     return bool(name_key and name_key in _token_key(text))
@@ -693,7 +695,24 @@ def _looks_like_person(value: str) -> bool:
     words = value.split()
     if len(words) < 2 or len(words) > 5:
         return False
-    generic_words = {"best", "top", "hvac", "companies", "contractors"}
+    generic_words = {
+        "best",
+        "bio",
+        "companies",
+        "consultants",
+        "contractors",
+        "construction",
+        "digital",
+        "family",
+        "group",
+        "hvac",
+        "impact",
+        "leadership",
+        "social",
+        "team",
+        "top",
+        "wikipedia",
+    }
     if any(word.casefold() in generic_words for word in words):
         return False
     return all(word[:1].isupper() or word in {"Dr."} for word in words)
@@ -766,6 +785,11 @@ def _role_category(title: str) -> RoleCategory:
 
 def _company_domain(company: CompanyProspect | QualifiedCompanyCandidate) -> str:
     return _domain(company.website)
+
+
+def _is_short_acronym(value: str) -> bool:
+    normalized = re.sub(r"[^A-Za-z]", "", value)
+    return 1 < len(normalized) <= 4 and normalized.isupper()
 
 
 def _domain(url: str) -> str:

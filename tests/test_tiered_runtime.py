@@ -155,8 +155,12 @@ def test_tiered_run_with_search_generates_company_contact_rows(tmp_path) -> None
         "needs_contact_count": 0,
     }
     assert checkpoint.qualification_counts == {
+        "ready_company_count": 2,
+        "company_prospect_count": 2,
         "ready_contact_count": 2,
+        "contact_candidate_count": 2,
         "qualified_company_count": 2,
+        "companies_with_contacts_count": 2,
         "needs_contact_count": 0,
         "rejected_candidate_count": 0,
     }
@@ -166,7 +170,7 @@ def test_tiered_run_with_search_generates_company_contact_rows(tmp_path) -> None
     } == {"accepted"}
 
 
-def test_tiered_live_search_continues_until_contact_ready_target(tmp_path) -> None:
+def test_tiered_live_search_targets_companies_and_caps_contacts_per_company(tmp_path) -> None:
     directive = parse_directive_payload(
         {
             "industry": "hvac",
@@ -187,16 +191,19 @@ def test_tiered_live_search_continues_until_contact_ready_target(tmp_path) -> No
                     "https://beta.example/team/jane-smith",
                     "Jane Smith is Owner at Beta Heating.",
                     provider="duckduckgo",
-                )
-            ]
-        if "Gamma Cooling owner" in query:
-            return [
+                ),
                 SearchResult(
-                    "Bob Jones - Owner at Gamma Cooling",
-                    "https://gamma.example/team/bob-jones",
-                    "Bob Jones is Owner at Gamma Cooling.",
+                    "Bob Jones - General Manager at Beta Heating",
+                    "https://beta.example/team/bob-jones",
+                    "Bob Jones is General Manager at Beta Heating.",
                     provider="duckduckgo",
-                )
+                ),
+                SearchResult(
+                    "Clara Oswald - Marketing Director at Beta Heating",
+                    "https://beta.example/team/clara-oswald",
+                    "Clara Oswald is Marketing Director at Beta Heating.",
+                    provider="duckduckgo",
+                ),
             ]
         return [
             SearchResult(
@@ -209,12 +216,6 @@ def test_tiered_live_search_continues_until_contact_ready_target(tmp_path) -> No
                 "Beta Heating DFW | HVAC Repair",
                 "https://beta.example",
                 "Beta Heating serves Dallas homes.",
-                provider="duckduckgo",
-            ),
-            SearchResult(
-                "Gamma Cooling DFW | HVAC Repair",
-                "https://gamma.example",
-                "Gamma Cooling serves Dallas homes.",
                 provider="duckduckgo",
             ),
         ][:max_results]
@@ -234,19 +235,23 @@ def test_tiered_live_search_continues_until_contact_ready_target(tmp_path) -> No
     assert [company.name for company in checkpoint.run.companies] == [
         "Alpha Air Conditioning",
         "Beta Heating",
-        "Gamma Cooling",
     ]
     assert [contact.name for contact in checkpoint.run.contacts] == [
         "Jane Smith",
         "Bob Jones",
     ]
     assert checkpoint.qualification_counts == {
+        "ready_company_count": 2,
+        "company_prospect_count": 2,
         "ready_contact_count": 2,
-        "qualified_company_count": 3,
+        "contact_candidate_count": 2,
+        "qualified_company_count": 2,
+        "companies_with_contacts_count": 1,
         "needs_contact_count": 1,
         "rejected_candidate_count": 0,
     }
     events = {event["status"]: event for event in checkpoint.events}
+    assert events["review_required"]["ready_company_count"] == 2
     assert events["review_required"]["ready_contact_count"] == 2
     assert events["review_required"]["needs_contact_count"] == 1
 
@@ -310,8 +315,12 @@ def test_tiered_live_search_filters_noise_and_does_not_create_contact_placeholde
         for contact in checkpoint.run.contacts
     )
     assert checkpoint.qualification_counts == {
+        "ready_company_count": 1,
+        "company_prospect_count": 1,
         "ready_contact_count": 0,
+        "contact_candidate_count": 0,
         "qualified_company_count": 1,
+        "companies_with_contacts_count": 0,
         "needs_contact_count": 1,
         "rejected_candidate_count": 2,
     }
@@ -374,8 +383,12 @@ def test_tiered_live_search_honors_negative_criteria(tmp_path) -> None:
     assert checkpoint.run.companies == ()
     assert checkpoint.run.contacts == ()
     assert checkpoint.qualification_counts == {
+        "ready_company_count": 0,
+        "company_prospect_count": 0,
         "ready_contact_count": 0,
+        "contact_candidate_count": 0,
         "qualified_company_count": 0,
+        "companies_with_contacts_count": 0,
         "needs_contact_count": 0,
         "rejected_candidate_count": 1,
     }
@@ -483,6 +496,43 @@ def test_tiered_final_enrichment_persists_injected_exa_records(tmp_path) -> None
     assert enriched.final_enrichment[0].provider == "exa"
     assert enriched.final_enrichment[0].contact_id == contact_id
     assert "final_enrichment_csv" in enriched.artifact_paths
+
+
+def test_tiered_final_enrichment_supports_company_only_approval(tmp_path) -> None:
+    checkpoint = _run_review_checkpoint(tmp_path)
+    company_id = checkpoint.run.companies[0].company_id
+    approval = ApprovedProspectSelection(
+        approved_company_ids=(company_id,),
+        approved_contact_ids=(),
+        reviewer="tester",
+    )
+    queries: list[str] = []
+
+    async def exa_search(query: str, _max_results: int):
+        queries.append(query)
+        return [
+            SearchResult(
+                "Acme company context",
+                "https://exa.example/acme",
+                "Company-level business context from Exa.",
+                provider="exa",
+            )
+        ]
+
+    records = asyncio.run(
+        enrich_selected_prospects(
+            checkpoint.run,
+            approval,
+            exa_search,
+        )
+    )
+
+    assert len(records) == 1
+    assert "Acme Dental" in queries[0]
+    assert checkpoint.run.contacts[0].name not in queries[0]
+    assert records[0].company_id == company_id
+    assert records[0].contact_id == ""
+    assert "Acme Dental" in records[0].summary
 
 
 def test_exa_final_enrichment_rejects_non_exa_search_results(tmp_path) -> None:

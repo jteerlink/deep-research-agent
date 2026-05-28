@@ -175,21 +175,22 @@ def test_build_tiered_preview_waits_for_required_fields() -> None:
     assert "waiting for industry" in preview["warnings"][0]
 
 
-def test_flatten_tiered_prospect_rows_uses_contact_level_identity(tmp_path) -> None:
+def test_flatten_tiered_prospect_rows_uses_company_level_identity(tmp_path) -> None:
     checkpoint = _tiered_checkpoint(tmp_path)
-    selected = {
-        f"{checkpoint.run.companies[0].company_id}::{checkpoint.run.contacts[0].contact_id}"
-    }
+    selected = {checkpoint.run.companies[0].company_id}
 
     rows = flatten_tiered_prospect_rows(checkpoint, selected_row_ids=selected)
 
     assert [row["row_id"] for row in rows] == [
-        f"{checkpoint.run.companies[0].company_id}::{checkpoint.run.contacts[0].contact_id}",
-        f"{checkpoint.run.companies[1].company_id}::{checkpoint.run.contacts[1].contact_id}",
+        checkpoint.run.companies[0].company_id,
+        checkpoint.run.companies[1].company_id,
     ]
     assert rows[0]["selected"] is True
     assert rows[1]["selected"] is False
+    assert rows[0]["row_type"] == "company"
     assert rows[0]["company_name"] == "Acme Dental"
+    assert rows[0]["contact_count"] == 1
+    assert rows[0]["contact_ids"] == [checkpoint.run.contacts[0].contact_id]
     assert rows[0]["contact_name"] == "Review Contact at Acme Dental"
     assert "review placeholder" in rows[0]["personalization_summary"]
 
@@ -207,8 +208,12 @@ def test_tiered_review_state_distinguishes_ready_and_empty_review(tmp_path) -> N
         "status": "review_required",
         "prospect_count": 2,
         "ready_prospect_count": 2,
+        "ready_company_count": 2,
+        "company_prospect_count": 2,
         "ready_contact_count": 2,
+        "contact_candidate_count": 2,
         "qualified_company_count": 2,
+        "companies_with_contacts_count": 2,
         "needs_contact_count": 0,
         "rejected_candidate_count": 0,
         "enrichment_count": 0,
@@ -219,8 +224,12 @@ def test_tiered_review_state_distinguishes_ready_and_empty_review(tmp_path) -> N
         "status": "review_required",
         "prospect_count": 0,
         "ready_prospect_count": 0,
+        "ready_company_count": 0,
+        "company_prospect_count": 0,
         "ready_contact_count": 0,
+        "contact_candidate_count": 0,
         "qualified_company_count": 0,
+        "companies_with_contacts_count": 0,
         "needs_contact_count": 0,
         "rejected_candidate_count": 0,
         "enrichment_count": 0,
@@ -280,37 +289,67 @@ def test_tiered_review_state_counts_ready_needs_contact_and_rejected() -> None:
 
     rows = flatten_tiered_prospect_rows(
         payload,
-        selected_row_ids={"company_ready::contact_ready", "company_needs::contact_placeholder"},
+        selected_row_ids={"company_ready", "company_needs"},
     )
 
     assert rows == [
         {
             "selected": True,
             "selectable": True,
-            "row_id": "company_ready::contact_ready",
+            "row_type": "company",
+            "row_id": "company_ready",
             "company_id": "company_ready",
             "contact_id": "contact_ready",
+            "contact_ids": ["contact_ready"],
             "company_name": "Ready Dental",
             "website": "https://ready.example",
             "fit_score": "",
+            "contact_count": 1,
+            "contact_names": "Jane Smith, Owner",
             "contact_name": "Jane Smith",
             "contact_title": "Owner",
             "contact_confidence": 0.86,
             "personalization_summary": "",
-        }
+        },
+        {
+            "selected": True,
+            "selectable": True,
+            "row_type": "company",
+            "row_id": "company_needs",
+            "company_id": "company_needs",
+            "contact_id": "",
+            "contact_ids": [],
+            "company_name": "Needs Contact Dental",
+            "website": "",
+            "fit_score": "",
+            "contact_count": 0,
+            "contact_names": "",
+            "contact_name": "",
+            "contact_title": "",
+            "contact_confidence": "",
+            "personalization_summary": "",
+        },
     ]
     assert qualification_summary(payload) == {
+        "ready_company_count": 2,
+        "company_prospect_count": 2,
         "ready_contact_count": 1,
+        "contact_candidate_count": 2,
         "qualified_company_count": 2,
+        "companies_with_contacts_count": 1,
         "needs_contact_count": 1,
         "rejected_candidate_count": 1,
     }
     assert tiered_review_state(payload) == {
         "status": "review_required",
-        "prospect_count": 1,
-        "ready_prospect_count": 1,
+        "prospect_count": 2,
+        "ready_prospect_count": 2,
+        "ready_company_count": 2,
+        "company_prospect_count": 2,
         "ready_contact_count": 1,
+        "contact_candidate_count": 2,
         "qualified_company_count": 2,
+        "companies_with_contacts_count": 1,
         "needs_contact_count": 1,
         "rejected_candidate_count": 1,
         "enrichment_count": 0,
@@ -334,6 +373,22 @@ def test_selected_prospect_rows_build_approval_for_checked_pairs(tmp_path) -> No
     assert approval.approved_contact_ids == (rows[0]["contact_id"],)
     assert approval.reviewer == "tester"
     assert approval.approved_at == "now"
+
+
+def test_selected_company_prospect_without_contact_builds_company_only_approval() -> None:
+    rows = [
+        {
+            "selected": True,
+            "selectable": True,
+            "company_id": "company_needs",
+            "contact_ids": [],
+        }
+    ]
+
+    approval = selection_from_prospect_rows(rows, reviewer="tester", approved_at="now")
+
+    assert approval.approved_company_ids == ("company_needs",)
+    assert approval.approved_contact_ids == ()
 
 
 def test_missing_exa_key_blocks_ui_enrichment_without_checkpoint_write(tmp_path) -> None:

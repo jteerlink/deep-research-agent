@@ -95,8 +95,12 @@ _FINAL_ENRICHMENT_FIELDS = (
     "warnings",
 )
 _QUALIFICATION_COUNT_KEYS = (
+    "ready_company_count",
+    "company_prospect_count",
     "ready_contact_count",
+    "contact_candidate_count",
     "qualified_company_count",
+    "companies_with_contacts_count",
     "needs_contact_count",
     "rejected_candidate_count",
 )
@@ -443,6 +447,12 @@ def _qualification_summary(
         if _audit_status(record) in {"accepted", "ready", "review_ready"}
         and str(record.get("contact_id") or "")
     }
+    accepted_contact_company_ids = {
+        str(record.get("company_id") or "")
+        for record in audit_records
+        if _audit_status(record) in {"accepted", "ready", "review_ready"}
+        and str(record.get("company_id") or "")
+    }
     needs_contact_companies = {
         str(record.get("company_id") or record.get("company_name") or record.get("name") or "")
         for record in audit_records
@@ -450,10 +460,18 @@ def _qualification_summary(
     }
 
     defaults = {
+        "ready_company_count": len(run.companies),
+        "company_prospect_count": len(run.companies),
         "ready_contact_count": (
             len(accepted_contact_ids) if accepted_contact_ids else len(run.contacts)
         ),
+        "contact_candidate_count": len(run.contacts),
         "qualified_company_count": len(run.companies),
+        "companies_with_contacts_count": len(
+            accepted_contact_company_ids
+            if accepted_contact_company_ids
+            else {company_id for company_id, count in contacts_by_company.items() if count}
+        ),
         "needs_contact_count": (
             len({item for item in needs_contact_companies if item})
             if needs_contact_companies
@@ -659,20 +677,19 @@ def _render_markdown_report(
         "",
         f"- **Industry**: {_escape_markdown(run.directive.industry)}",
         f"- **Geography**: {_escape_markdown(run.directive.geographic_area)}",
-        f"- **Target count**: {run.directive.target_prospect_count}",
+        f"- **Target company prospects**: {run.directive.target_prospect_count}",
         f"- **Criteria**: {_escape_markdown(run.directive.research_criteria)}",
         "",
         "## Summary",
         "",
-        f"- Companies: {len(run.companies)}",
-        f"- Contacts: {len(run.contacts)}",
+        f"- Company prospects: {summary.get('company_prospect_count', len(run.companies))}",
+        f"- Contact candidates: {summary.get('contact_candidate_count', len(run.contacts))}",
         f"- Personalization signals: "
         f"{sum(len(item.personalization_signals) for item in run.personalizations)}",
         f"- Browser captures: {len(run.browser_captures)}",
         f"- Final enrichment records: {len(final_enrichment)}",
-        f"- Ready contact rows: {summary.get('ready_contact_count', len(run.contacts))}",
-        f"- Qualified companies: {summary.get('qualified_company_count', len(run.companies))}",
-        f"- Qualified companies needing contacts: {summary.get('needs_contact_count', 0)}",
+        f"- Companies with contacts: {summary.get('companies_with_contacts_count', 0)}",
+        f"- Companies needing contacts: {summary.get('needs_contact_count', 0)}",
         f"- Rejected/noisy candidates: {summary.get('rejected_candidate_count', 0)}",
         "",
         "## Qualified Companies",
