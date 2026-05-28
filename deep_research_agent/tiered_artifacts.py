@@ -415,7 +415,8 @@ def _qualification_audit_records(
         raw = raw.get("records") or raw.get("audit") or raw.get("items") or ()
 
     records: list[dict[str, Any]] = []
-    for index, item in enumerate(raw if isinstance(raw, Sequence) and not isinstance(raw, str) else ()):
+    raw_items = raw if isinstance(raw, Sequence) and not isinstance(raw, str) else ()
+    for index, item in enumerate(raw_items):
         if not isinstance(item, Mapping):
             continue
         record = {str(key): _jsonable(value) for key, value in item.items()}
@@ -449,12 +450,18 @@ def _qualification_summary(
     }
 
     defaults = {
-        "ready_contact_count": len(accepted_contact_ids) if accepted_contact_ids else len(run.contacts),
+        "ready_contact_count": (
+            len(accepted_contact_ids) if accepted_contact_ids else len(run.contacts)
+        ),
         "qualified_company_count": len(run.companies),
         "needs_contact_count": (
             len({item for item in needs_contact_companies if item})
             if needs_contact_companies
-            else sum(1 for company in run.companies if contacts_by_company.get(company.company_id, 0) == 0)
+            else sum(
+                1
+                for company in run.companies
+                if contacts_by_company.get(company.company_id, 0) == 0
+            )
         ),
         "rejected_candidate_count": sum(
             1 for record in audit_records if _audit_status(record) == "rejected"
@@ -475,7 +482,7 @@ def _metadata_count(metadata: Mapping[str, Any], key: str, *, default: int) -> i
     if value in (None, ""):
         return default
     try:
-        return int(value)
+        return int(str(value))
     except (TypeError, ValueError):
         return default
 

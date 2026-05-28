@@ -250,7 +250,7 @@ def qualify_company_hits(
     max_evaluated = target * oversample_factor
     for index, hit in enumerate(tuple(hits)[:max_evaluated], start=1):
         candidate = _company_candidate_from_hit(hit)
-        reasons = _company_rejection_reasons(hit, candidate)
+        reasons = _company_rejection_reasons(hit, candidate, directive)
         key = candidate.casefold()
         if key in seen:
             reasons = (*reasons, "duplicate_company")
@@ -361,7 +361,11 @@ def _company_candidate_from_hit(hit: TieredSearchHit) -> str:
     return primary
 
 
-def _company_rejection_reasons(hit: TieredSearchHit, candidate: str) -> tuple[str, ...]:
+def _company_rejection_reasons(
+    hit: TieredSearchHit,
+    candidate: str,
+    directive: SearchDirective,
+) -> tuple[str, ...]:
     text = f"{hit.title} {hit.content}".casefold()
     domain = _domain(hit.url)
     reasons: list[str] = []
@@ -375,6 +379,14 @@ def _company_rejection_reasons(hit: TieredSearchHit, candidate: str) -> tuple[st
         reasons.append("article_or_blog_source")
     if candidate and not _looks_official_domain(domain) and _is_generic_company_name(candidate):
         reasons.append("not_specific_company")
+    reasons.extend(
+        _negative_criteria_reasons(
+            directive.negative_criteria,
+            hit.title,
+            hit.content,
+            candidate,
+        )
+    )
     return _dedupe(reasons)
 
 
@@ -423,7 +435,37 @@ def _contact_rejection_reasons(
         reasons.append("not_person_identity")
     if title and _looks_like_listicle(title, "", _domain(hit.url)):
         reasons.append("article_or_list_title")
+    reasons.extend(
+        _negative_criteria_reasons(
+            directive.negative_criteria,
+            hit.title,
+            hit.content,
+            name,
+            title,
+        )
+    )
     return _dedupe(reasons)
+
+
+def _negative_criteria_reasons(
+    negative_criteria: str,
+    *values: str,
+) -> tuple[str, ...]:
+    text = " ".join(value for value in values if value).casefold()
+    reasons = [
+        f"negative_criteria_match:{phrase}"
+        for phrase in _negative_criteria_phrases(negative_criteria)
+        if phrase.casefold() in text
+    ]
+    return tuple(reasons)
+
+
+def _negative_criteria_phrases(value: str) -> tuple[str, ...]:
+    return tuple(
+        phrase.strip()
+        for phrase in re.split(r"[,;]", value)
+        if phrase.strip()
+    )
 
 
 def _accepted_contact_reasons(

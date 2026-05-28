@@ -249,7 +249,10 @@ def flatten_tiered_prospect_rows(
 
     payload = _tiered_payload(checkpoint)
     selected = set(selected_row_ids)
-    audit_records = qualification_audit_rows(payload, include_statuses=("accepted", "ready", "review_ready"))
+    audit_records = qualification_audit_rows(
+        payload,
+        include_statuses=("accepted", "ready", "review_ready"),
+    )
     accepted_contact_ids = {
         str(record.get("contact_id") or "")
         for record in audit_records
@@ -463,7 +466,10 @@ def qualification_summary(
     """Return additive qualification counts from checkpoint/artifact payloads."""
 
     payload = _tiered_payload(checkpoint)
-    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
+    metadata_value = payload.get("metadata")
+    metadata: Mapping[str, Any] = (
+        metadata_value if isinstance(metadata_value, Mapping) else {}
+    )
     audit = _qualification_audit(payload)
     companies = [
         company for company in payload.get("companies") or () if isinstance(company, Mapping)
@@ -503,7 +509,9 @@ def qualification_summary(
                 if str(company.get("company_id") or "") not in contact_company_ids
             )
         ),
-        "rejected_candidate_count": sum(1 for record in audit if _audit_status(record) == "rejected"),
+        "rejected_candidate_count": sum(
+            1 for record in audit if _audit_status(record) == "rejected"
+        ),
     }
     return {
         key: _payload_count(payload, metadata, key, default=value)
@@ -625,7 +633,7 @@ def _payload_count(
     if value in (None, ""):
         return default
     try:
-        return int(value)
+        return int(str(value))
     except (TypeError, ValueError):
         return default
 
@@ -1203,7 +1211,9 @@ def render_app() -> None:
                 st.info("No contact-level prospect rows are available in this tiered checkpoint.")
             audit_rows = qualification_audit_rows(tiered_state)
             if audit_rows:
-                with st.expander("Qualification audit: needs contact and rejected/noisy candidates"):
+                with st.expander(
+                    "Qualification audit: needs contact and rejected/noisy candidates"
+                ):
                     st.dataframe(audit_rows, width="stretch")
         else:
             st.dataframe(preview["prospect_targets"], width="stretch")

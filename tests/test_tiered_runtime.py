@@ -80,11 +80,13 @@ def test_tiered_run_with_search_generates_company_contact_rows(tmp_path) -> None
         }
     )
     queries: list[str] = []
+    max_result_values: list[int] = []
 
     async def search(query: str, max_results: int):
         queries.append(query)
-        assert max_results == 2
+        max_result_values.append(max_results)
         if "Acme Dental owner" in query:
+            assert max_results == 2
             return [
                 SearchResult(
                     "Dr. Ada Lovelace - Owner at Acme Dental",
@@ -94,6 +96,7 @@ def test_tiered_run_with_search_generates_company_contact_rows(tmp_path) -> None
                 )
             ]
         if "Beta Dental owner" in query:
+            assert max_results == 2
             return [
                 SearchResult(
                     "Grace Hopper - CEO at Beta Dental",
@@ -140,6 +143,163 @@ def test_tiered_run_with_search_generates_company_contact_rows(tmp_path) -> None
     ]
     assert "review_required" in [event["status"] for event in checkpoint.events]
     assert any("dental companies" in query for query in queries)
+    assert max(max_result_values) > 2
+    events = {event["status"]: event for event in checkpoint.events}
+    assert events["company_qualification_complete"]["rejected_company_count"] == 0
+    assert events["contact_qualification_complete"] == {
+        "status": "contact_qualification_complete",
+        "message": "2 qualified contact-level prospect row(s) promoted for review",
+        "timestamp": events["contact_qualification_complete"]["timestamp"],
+        "accepted_contact_count": 2,
+        "rejected_contact_count": 0,
+        "needs_contact_count": 0,
+    }
+    assert checkpoint.qualification_counts == {
+        "ready_contact_count": 2,
+        "qualified_company_count": 2,
+        "needs_contact_count": 0,
+        "rejected_candidate_count": 0,
+    }
+    assert {
+        record["status"]
+        for record in checkpoint.qualification_audit
+    } == {"accepted"}
+
+
+def test_tiered_live_search_filters_noise_and_does_not_create_contact_placeholder(
+    tmp_path,
+) -> None:
+    directive = parse_directive_payload(
+        {
+            "industry": "hvac",
+            "geography": "Dallas",
+            "target_prospect_count": 1,
+            "research_criteria": "owner operated",
+            "preferred_contact_roles": ["owner"],
+        }
+    )
+
+    async def search(query: str, _max_results: int):
+        if "Houk Air Conditioning owner" in query:
+            return [
+                SearchResult(
+                    "7 Best HVAC Companies in Fort Worth, TX of 2026",
+                    "https://www.consumeraffairs.com/homeowners/fort-worth-hvac.html",
+                    "Reviewed HVAC companies and customer reviews.",
+                    provider="duckduckgo",
+                )
+            ]
+        return [
+            SearchResult(
+                "Local SEO for HVAC Companies in Dallas, TX",
+                "https://www.vaza.ai/blog/local-seo-hvac-dallas",
+                "Marketing agency page for HVAC lead generation.",
+                provider="duckduckgo",
+            ),
+            SearchResult(
+                "Houk Air Conditioning DFW | HVAC Repair",
+                "https://www.houkac.com/air-conditioning",
+                "Houk Air Conditioning serves homes across Dallas-Fort Worth.",
+                provider="duckduckgo",
+            ),
+        ]
+
+    checkpoint = asyncio.run(
+        run_tiered_research_with_search(
+            directive,
+            search=search,
+            thread_id="tiered-live-qualified",
+            checkpoint_dir=tmp_path / "checkpoints",
+            artifact_dir=tmp_path / "artifacts",
+            max_results=2,
+            max_contact_queries_per_company=1,
+        )
+    )
+
+    assert [company.name for company in checkpoint.run.companies] == [
+        "Houk Air Conditioning"
+    ]
+    assert checkpoint.run.contacts == ()
+    assert not any(
+        contact.name.startswith("Review Contact at")
+        for contact in checkpoint.run.contacts
+    )
+    assert checkpoint.qualification_counts == {
+        "ready_contact_count": 0,
+        "qualified_company_count": 1,
+        "needs_contact_count": 1,
+        "rejected_candidate_count": 2,
+    }
+    assert {
+        reason
+        for record in checkpoint.qualification_audit
+        for reason in record["reasons"]
+    } >= {
+        "non_target_marketing_page",
+        "qualified_company_needs_contact",
+        "article_or_list_title",
+    }
+    events = {event["status"]: event for event in checkpoint.events}
+    assert events["company_qualification_complete"]["rejected_company_count"] == 1
+    assert events["contact_qualification_complete"]["accepted_contact_count"] == 0
+    assert events["contact_qualification_complete"]["rejected_contact_count"] == 1
+    assert events["contact_qualification_complete"]["needs_contact_count"] == 1
+    artifact_payload = checkpoint.to_dict()
+    assert artifact_payload["qualification_audit"]
+    assert artifact_payload["metadata"]["needs_contact_count"] == 1
+    assert artifact_payload["metadata"]["rejected_candidate_count"] == 2
+
+
+def test_tiered_live_search_honors_negative_criteria(tmp_path) -> None:
+    directive = parse_directive_payload(
+        {
+            "industry": "hvac",
+            "geography": "Dallas",
+            "target_prospect_count": 1,
+            "research_criteria": "owner operated",
+            "negative_criteria": "franchise",
+            "preferred_contact_roles": ["owner"],
+        }
+    )
+
+    async def search(query: str, _max_results: int):
+        if "hvac companies" not in query:
+            return []
+        return [
+            SearchResult(
+                "Franchise HVAC DFW | HVAC Repair",
+                "https://franchise-hvac.example",
+                "Franchise HVAC is a national franchise serving Dallas.",
+                provider="duckduckgo",
+            )
+        ]
+
+    checkpoint = asyncio.run(
+        run_tiered_research_with_search(
+            directive,
+            search=search,
+            thread_id="tiered-live-negative-criteria",
+            checkpoint_dir=tmp_path / "checkpoints",
+            artifact_dir=tmp_path / "artifacts",
+            max_results=1,
+            max_contact_queries_per_company=1,
+        )
+    )
+
+    assert checkpoint.run.companies == ()
+    assert checkpoint.run.contacts == ()
+    assert checkpoint.qualification_counts == {
+        "ready_contact_count": 0,
+        "qualified_company_count": 0,
+        "needs_contact_count": 0,
+        "rejected_candidate_count": 1,
+    }
+    assert checkpoint.qualification_audit[0]["reasons"] == [
+        "negative_criteria_match:franchise"
+    ]
+    events = {event["status"]: event for event in checkpoint.events}
+    assert events["company_qualification_complete"]["rejected_company_count"] == 1
+    assert events["contact_qualification_complete"]["accepted_contact_count"] == 0
 
 
 def test_tiered_thread_id_rejects_path_traversal(tmp_path) -> None:
