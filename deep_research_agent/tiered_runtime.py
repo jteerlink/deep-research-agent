@@ -57,6 +57,7 @@ DEFAULT_TIERED_CHECKPOINT_DIR = ".deep_research_agent/tiered_checkpoints"
 DEFAULT_TIERED_ARTIFACT_DIR = ".deep_research_agent/tiered_artifacts"
 _THREAD_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 LIVE_COMPANY_OVERSAMPLE_FACTOR = 4
+LIVE_CONTACT_COMPANY_POOL_FACTOR = 3
 MAX_LIVE_COMPANY_CANDIDATES = 50
 FinalEnrichmentFactory = Callable[
     [TieredResearchRun, ApprovedProspectSelection],
@@ -194,7 +195,7 @@ async def run_tiered_research_with_search(
     checkpoint_dir: str | Path = DEFAULT_TIERED_CHECKPOINT_DIR,
     artifact_dir: str | Path = DEFAULT_TIERED_ARTIFACT_DIR,
     max_results: int = 5,
-    max_contact_queries_per_company: int = 2,
+    max_contact_queries_per_company: int = 4,
     provider_policy: ProviderPolicy | None = None,
 ) -> TieredCheckpoint:
     """Create a review-gated tiered checkpoint from live injected search results."""
@@ -214,21 +215,21 @@ async def run_tiered_research_with_search(
         search=search,
         provider_policy=policy,
     )
+    company_pool_target = _company_pool_target(directive, company_result_cap)
     company_qualification = qualify_company_hits(
         company_batch.hits,
         directive,
-        target_count=directive.target_prospect_count,
+        target_count=company_pool_target,
         oversample_factor=LIVE_COMPANY_OVERSAMPLE_FACTOR,
     )
-    companies = [
-        candidate.to_company_prospect(directive)
-        for candidate in company_qualification.accepted
-    ]
     company_audit = _company_audit_payloads(company_qualification)
     contact_audit: list[dict[str, Any]] = []
+    companies: list[CompanyProspect] = []
     contacts: list[ContactCandidate] = []
     contact_failures = 0
-    for company in companies:
+    for candidate in company_qualification.accepted:
+        company = candidate.to_company_prospect(directive)
+        companies.append(company)
         target = CompanySearchTarget(company.name, website=company.website)
         queries = build_contact_discovery_queries(search_directive, target)[
             :max_contact_queries_per_company
@@ -241,10 +242,12 @@ async def run_tiered_research_with_search(
             provider_policy=policy,
         )
         contact_failures += len(contact_batch.failures)
+        remaining_contact_slots = max(directive.target_prospect_count - len(contacts), 1)
         contact_qualification = qualify_contact_hits(
             contact_batch.hits,
             company,
             directive,
+            max_contacts=remaining_contact_slots,
         )
         company_contacts = [
             candidate.to_contact_candidate()
@@ -254,6 +257,8 @@ async def run_tiered_research_with_search(
         contact_audit.extend(
             _contact_audit_payloads(contact_qualification, company)
         )
+        if len(contacts) >= directive.target_prospect_count:
+            break
 
     qualification_audit = [*company_audit, *contact_audit]
     personalizations = _personalizations_for_contacts(
@@ -544,9 +549,21 @@ def _search_directive_from_run_directive(directive: SearchDirective) -> TieredSe
 def _company_candidate_result_cap(directive: SearchDirective, max_results: int) -> int:
     requested_pool = max(
         max_results,
-        directive.target_prospect_count * LIVE_COMPANY_OVERSAMPLE_FACTOR,
+        directive.target_prospect_count
+        * LIVE_CONTACT_COMPANY_POOL_FACTOR
+        * LIVE_COMPANY_OVERSAMPLE_FACTOR,
     )
     return min(MAX_LIVE_COMPANY_CANDIDATES, requested_pool)
+
+
+def _company_pool_target(directive: SearchDirective, company_result_cap: int) -> int:
+    return min(
+        company_result_cap,
+        max(
+            directive.target_prospect_count,
+            directive.target_prospect_count * LIVE_CONTACT_COMPANY_POOL_FACTOR,
+        ),
+    )
 
 
 def _company_audit_payloads(batch: QualifiedCompanyBatch) -> list[dict[str, Any]]:

@@ -41,12 +41,19 @@ _LISTICLE_PHRASES = (
 _DIRECTORY_DOMAINS = (
     "angi.com",
     "bbb.org",
+    "bestpickreports.com",
     "chamberofcommerce.com",
     "consumeraffairs.com",
     "contractorsup.com",
+    "dallasprolist.com",
+    "downtobid.com",
+    "electricalup.com",
+    "expertise.com",
     "homeadvisor.com",
     "houzz.com",
+    "procore.com",
     "thumbtack.com",
+    "thebluebook.com",
     "yelp.com",
     "yellowpages.com",
 )
@@ -56,6 +63,30 @@ _CONTENT_DOMAINS = (
     "medium.com",
     "news.",
     "substack.com",
+)
+_CONTENT_PATH_MARKERS = (
+    "/article",
+    "/articles",
+    "/blog",
+    "/blogs",
+    "/guide",
+    "/guides",
+    "/news",
+    "/resources",
+)
+_JOB_BOARD_DOMAINS = (
+    "indeed.com",
+    "linkedin.com/jobs",
+    "ziprecruiter.com",
+)
+_JOB_TERMS = (
+    "career",
+    "careers",
+    "hiring",
+    "job",
+    "jobs",
+    "position",
+    "positions",
 )
 _MARKETING_TERMS = (
     "seo",
@@ -87,6 +118,7 @@ _GENERIC_COMPANY_TITLES = {
     "about",
     "about us",
     "contact",
+    "it",
     "services",
     "team",
     "leadership",
@@ -354,6 +386,9 @@ def _company_candidate_from_hit(hit: TieredSearchHit) -> str:
     primary = re.split(r"\s+[|–—]\s+|\s+-\s+", title, maxsplit=1)[0].strip()
     primary = _strip_company_tail(primary)
     if _is_generic_company_name(primary):
+        from_tail = _company_from_title_tail(title)
+        if from_tail:
+            return from_tail
         from_content = _company_from_content(hit.content)
         if from_content:
             return from_content
@@ -375,8 +410,10 @@ def _company_rejection_reasons(
         reasons.append("non_target_marketing_page")
     if _looks_like_listicle(hit.title, hit.content, domain):
         reasons.append("listicle_or_directory")
-    if _is_content_domain(domain):
+    if _is_content_source(hit.url, hit.title):
         reasons.append("article_or_blog_source")
+    if _is_job_source(hit.url, hit.title, hit.content):
+        reasons.append("job_board_or_career_page")
     if candidate and not _looks_official_domain(domain) and _is_generic_company_name(candidate):
         reasons.append("not_specific_company")
     reasons.extend(
@@ -563,6 +600,8 @@ def _looks_like_listicle(title: str, content: str, domain: str) -> bool:
         return True
     if _YEAR_PATTERN.search(title_key) and any(term in title_key for term in _LISTICLE_PHRASES):
         return True
+    if re.search(r"\b\d+\s+(?:best|top)\b", title_key):
+        return True
     if re.search(r"\b(?:best|top)\s+\d+\b", title_key):
         return True
     return any(term in text for term in _LISTICLE_PHRASES) and bool(
@@ -578,8 +617,44 @@ def _is_content_domain(domain: str) -> bool:
     return any(marker in domain for marker in _CONTENT_DOMAINS)
 
 
+def _is_content_source(url: str, title: str) -> bool:
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    path = parsed.path.casefold()
+    title_key = title.casefold()
+    return (
+        _is_content_domain(_domain(url))
+        or any(marker in path for marker in _CONTENT_PATH_MARKERS)
+        or bool(re.search(r"^(?:how to|guide to|what to|why )\b", title_key))
+    )
+
+
+def _is_job_source(url: str, title: str, content: str) -> bool:
+    domain = _domain(url)
+    text = f"{title} {content}".casefold()
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    path = parsed.path.casefold()
+    return (
+        any(
+            domain.endswith(job_domain) or job_domain in domain
+            for job_domain in _JOB_BOARD_DOMAINS
+        )
+        or bool(re.search(r"\b(?:job|jobs|hiring|careers?)\b", path))
+        or (
+            bool(re.search(r"\b(?:jobs|hiring|careers?)\b", text))
+            and bool(
+                re.search(
+                    r"\b(?:apply|available|opening|openings|position|positions)\b",
+                    text,
+                )
+            )
+        )
+    )
+
+
 def _looks_official_domain(domain: str) -> bool:
-    return bool(domain) and not any(domain.endswith(noisy) for noisy in _DIRECTORY_DOMAINS)
+    return bool(domain) and not any(
+        domain.endswith(noisy) for noisy in (*_DIRECTORY_DOMAINS, *_JOB_BOARD_DOMAINS)
+    )
 
 
 def _is_generic_company_name(value: str) -> bool:
@@ -588,9 +663,22 @@ def _is_generic_company_name(value: str) -> bool:
         return True
     if _YEAR_PATTERN.search(normalized):
         return True
+    if any(term in normalized for term in _JOB_TERMS):
+        return True
+    if re.search(r"^(?:how to|guide to|what to|why )\b", normalized):
+        return True
+    if re.fullmatch(
+        r"(?:local\s+|commercial\s+|residential\s+|emergency\s+)?"
+        r"(?:electrician|electricians|electrical contractor|electrical contractors|"
+        r"commercial electrician|commercial electrical contractor)"
+        r"(?:\s+in\b.*)?",
+        normalized,
+    ):
+        return True
     return bool(
         re.search(
-            r"\b(?:best|top)\b.*\b(?:companies|contractors|near me|reviews|directory)\b",
+            r"(?:\b(?:best|top)\b.*\b(?:companies|contractors|near me|reviews|directory)\b)"
+            r"|(?:\b\d+\s+(?:best|top)\b)",
             normalized,
         )
     )
@@ -613,8 +701,8 @@ def _looks_like_person(value: str) -> bool:
 
 def _company_from_content(content: str) -> str:
     match = re.search(
-        r"\b([A-Z][A-Za-z&'.-]+(?:\s+[A-Z][A-Za-z&'.-]+){1,5})\s+"
-        r"(?:is|serves|offers|provides|specializes|has)\b",
+        r"\b([A-Z][A-Za-z&'.-]+(?:\s+[A-Z][A-Za-z&'.-]+){0,5})\s+"
+        r"(?:assisted|is|serves|offers|provides|specializes|has)\b",
         content,
     )
     if not match:
@@ -622,11 +710,20 @@ def _company_from_content(content: str) -> str:
     return _strip_company_tail(match.group(1))
 
 
+def _company_from_title_tail(title: str) -> str:
+    parts = re.split(r"\s+[|–—]\s+|\s+-\s+", title)
+    for part in parts[1:]:
+        candidate = _strip_company_tail(part)
+        if candidate and not _is_generic_company_name(candidate):
+            return candidate
+    return ""
+
+
 def _strip_company_tail(value: str) -> str:
-    candidate = re.sub(r"\s+", " ", value).strip(" -–—|")
+    candidate = re.sub(r"\s+", " ", value).strip(" ,.-–—|")
     candidate = re.sub(r"\b(?:DFW|Dallas|Fort Worth|TX|Texas)\b\.?", "", candidate).strip()
     candidate = re.sub(r"\b(?:Official Site|Home Page|Homepage|Website)\b", "", candidate).strip()
-    candidate = re.sub(r"\s+", " ", candidate).strip(" -–—|")
+    candidate = re.sub(r"\s+", " ", candidate).strip(" ,.-–—|")
     return candidate
 
 

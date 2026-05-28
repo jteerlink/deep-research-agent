@@ -72,6 +72,53 @@ def test_company_qualification_rejects_listicles_and_marketing_pages() -> None:
     assert {record.status for record in batch.audit_records} == {"rejected"}
 
 
+def test_company_qualification_rejects_job_boards_articles_and_reversed_listicles() -> None:
+    batch = qualify_company_hits(
+        (
+            _hit(
+                "Electrician jobs in Dallas-Fort Worth, TX - Indeed",
+                "https://www.indeed.com/q-electrician-l-dallas-fort-worth,-tx-jobs.html",
+                "610 Electrician jobs available. Apply to Journeyperson Electrician.",
+            ),
+            _hit(
+                "14 Best Fort Worth, TX Electricians | Expertise.com",
+                "https://www.expertise.com/home-improvement/electricians/texas/fort-worth",
+                "Reviewed electrician companies and customer reviews.",
+            ),
+            _hit(
+                "How to Choose a Reliable Certified Electrician in Dallas-Fort Worth",
+                "https://callw3.com/blog/how-to-choose-a-reliable-certified-electrician-in-dallas-fort-worth",
+                "Guide to choosing a certified electrical contractor.",
+            ),
+            _hit(
+                "Commercial Electrical Contractor Dallas, TX",
+                "https://fsg.com/locations/dallas",
+                "FSG Dallas is a full-service commercial electrical contractor.",
+            ),
+            _hit(
+                "Local Electrician in Dallas, TX | Mr. Electric",
+                "https://www.mrelectricdallas.com",
+                "Certified electricians in Dallas.",
+            ),
+        ),
+        SearchDirective(
+            industry="electrician",
+            geographic_area="Dallas-Fort Worth TX",
+            target_prospect_count=3,
+            research_criteria="has company website",
+        ),
+    )
+
+    assert [company.name for company in batch.accepted] == ["FSG", "Mr. Electric"]
+    rejected_reasons = {
+        reason for record in batch.rejected for reason in record.reasons
+    }
+    assert "job_board_or_career_page" in rejected_reasons
+    assert "listicle_or_directory" in rejected_reasons
+    assert "article_or_blog_source" in rejected_reasons
+    assert "not_specific_company" in rejected_reasons
+
+
 def test_company_qualification_accepts_official_business_domain() -> None:
     batch = qualify_company_hits(
         (

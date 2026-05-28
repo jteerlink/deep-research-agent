@@ -244,10 +244,10 @@ def build_contact_discovery_queries(
         "marketing director",
     )
     seeds = [f"{company.name} {role}" for role in roles]
+    seeds.append(f"site:linkedin.com/in {company.name} {' OR '.join(roles[:3])}")
     if company.website:
         domain = company.website.removeprefix("https://").removeprefix("http://").split("/", 1)[0]
         seeds.extend((f"site:{domain} team", f"site:{domain} about", f"site:{domain} leadership"))
-    seeds.append(f"site:linkedin.com/in {company.name} {' OR '.join(roles[:3])}")
     return _dedupe_preserve_order(seeds)
 
 
@@ -322,6 +322,7 @@ async def collect_tiered_search(
     normalized_queries = _dedupe_preserve_order(queries)
     hits: list[TieredSearchHit] = []
     failures: list[TieredSearchFailure] = []
+    seen_hits: set[str] = set()
     for query in normalized_queries:
         try:
             results = await search_func(query, max_results)
@@ -349,6 +350,10 @@ async def collect_tiered_search(
                     )
                 )
                 continue
+            hit_key = _hit_dedupe_key(hit)
+            if hit_key in seen_hits:
+                continue
+            seen_hits.add(hit_key)
             hits.append(hit)
     return TieredSearchBatch(
         tier=tier,
@@ -356,6 +361,12 @@ async def collect_tiered_search(
         hits=tuple(hits),
         failures=tuple(failures),
     )
+
+
+def _hit_dedupe_key(hit: TieredSearchHit) -> str:
+    if hit.url.strip():
+        return f"url:{hit.url.strip().casefold()}"
+    return f"title:{hit.title.strip().casefold()}|content:{hit.content.strip().casefold()}"
 
 
 async def collect_company_discovery_search(

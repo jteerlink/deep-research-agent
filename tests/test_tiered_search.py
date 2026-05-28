@@ -83,10 +83,10 @@ def test_contact_and_personalization_queries_are_scoped_to_targets() -> None:
     assert build_contact_discovery_queries(directive, company) == (
         "Acme Air owner",
         "Acme Air growth lead",
+        "site:linkedin.com/in Acme Air owner OR growth lead",
         "site:acme.example team",
         "site:acme.example about",
         "site:acme.example leadership",
-        "site:linkedin.com/in Acme Air owner OR growth lead",
     )
     assert build_personalization_queries(directive, contact) == (
         "Jane Smith Acme Air Owner",

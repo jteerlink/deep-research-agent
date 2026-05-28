@@ -166,6 +166,91 @@ def test_tiered_run_with_search_generates_company_contact_rows(tmp_path) -> None
     } == {"accepted"}
 
 
+def test_tiered_live_search_continues_until_contact_ready_target(tmp_path) -> None:
+    directive = parse_directive_payload(
+        {
+            "industry": "hvac",
+            "geography": "Dallas",
+            "target_prospect_count": 2,
+            "research_criteria": "owner operated",
+            "preferred_contact_roles": ["owner"],
+        }
+    )
+
+    async def search(query: str, max_results: int):
+        if "Alpha Air Conditioning owner" in query:
+            return []
+        if "Beta Heating owner" in query:
+            return [
+                SearchResult(
+                    "Jane Smith - Owner at Beta Heating",
+                    "https://beta.example/team/jane-smith",
+                    "Jane Smith is Owner at Beta Heating.",
+                    provider="duckduckgo",
+                )
+            ]
+        if "Gamma Cooling owner" in query:
+            return [
+                SearchResult(
+                    "Bob Jones - Owner at Gamma Cooling",
+                    "https://gamma.example/team/bob-jones",
+                    "Bob Jones is Owner at Gamma Cooling.",
+                    provider="duckduckgo",
+                )
+            ]
+        return [
+            SearchResult(
+                "Alpha Air Conditioning DFW | HVAC Repair",
+                "https://alpha.example",
+                "Alpha Air Conditioning serves Dallas homes.",
+                provider="duckduckgo",
+            ),
+            SearchResult(
+                "Beta Heating DFW | HVAC Repair",
+                "https://beta.example",
+                "Beta Heating serves Dallas homes.",
+                provider="duckduckgo",
+            ),
+            SearchResult(
+                "Gamma Cooling DFW | HVAC Repair",
+                "https://gamma.example",
+                "Gamma Cooling serves Dallas homes.",
+                provider="duckduckgo",
+            ),
+        ][:max_results]
+
+    checkpoint = asyncio.run(
+        run_tiered_research_with_search(
+            directive,
+            search=search,
+            thread_id="tiered-live-contact-target",
+            checkpoint_dir=tmp_path / "checkpoints",
+            artifact_dir=tmp_path / "artifacts",
+            max_results=3,
+            max_contact_queries_per_company=1,
+        )
+    )
+
+    assert [company.name for company in checkpoint.run.companies] == [
+        "Alpha Air Conditioning",
+        "Beta Heating",
+        "Gamma Cooling",
+    ]
+    assert [contact.name for contact in checkpoint.run.contacts] == [
+        "Jane Smith",
+        "Bob Jones",
+    ]
+    assert checkpoint.qualification_counts == {
+        "ready_contact_count": 2,
+        "qualified_company_count": 3,
+        "needs_contact_count": 1,
+        "rejected_candidate_count": 0,
+    }
+    events = {event["status"]: event for event in checkpoint.events}
+    assert events["review_required"]["ready_contact_count"] == 2
+    assert events["review_required"]["needs_contact_count"] == 1
+
+
 def test_tiered_live_search_filters_noise_and_does_not_create_contact_placeholder(
     tmp_path,
 ) -> None:
