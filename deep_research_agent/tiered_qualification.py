@@ -21,7 +21,7 @@ from .tiered_models import (
     SearchDirective,
     SourceConfidence,
 )
-from .tiered_search import TierName, TieredSearchHit
+from .tiered_search import TieredSearchHit, TierName
 
 QualificationStatus = Literal["accepted", "rejected", "needs_contact"]
 
@@ -298,7 +298,7 @@ def qualify_contact_hits(
     seen: set[str] = set()
     company_name = company.name
     company_id = company.company_id
-    for index, hit in enumerate(hits, start=1):
+    for hit in hits:
         name, title = _contact_name_and_title(hit)
         reasons = _contact_rejection_reasons(hit, name, title, company, directive)
         key = name.casefold()
@@ -327,7 +327,9 @@ def qualify_contact_hits(
             reasons=accepted_reasons,
         )
         accepted.append(qualified)
-        audit.append(_audit(hit, "accepted", accepted_reasons, name, evidence_id, _confidence(score)))
+        audit.append(
+            _audit(hit, "accepted", accepted_reasons, name, evidence_id, _confidence(score))
+        )
         if len(accepted) >= max_contacts:
             break
 
@@ -561,7 +563,8 @@ def _looks_like_person(value: str) -> bool:
     words = value.split()
     if len(words) < 2 or len(words) > 5:
         return False
-    if any(word.casefold() in {"best", "top", "hvac", "companies", "contractors"} for word in words):
+    generic_words = {"best", "top", "hvac", "companies", "contractors"}
+    if any(word.casefold() in generic_words for word in words):
         return False
     return all(word[:1].isupper() or word in {"Dr."} for word in words)
 
