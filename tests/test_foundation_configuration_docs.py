@@ -1,8 +1,7 @@
-"""Regression checks for the G001 env/LangGraph/docs foundation skeleton."""
+"""Regression checks for the local-first env/docs foundation skeleton."""
 
 from __future__ import annotations
 
-import json
 import tomllib
 from pathlib import Path
 
@@ -30,8 +29,6 @@ def test_env_example_documents_provider_split_and_search_keys() -> None:
         "SERPER_API_KEY",
         "FIRECRAWL_API_KEY",
         "YDC_API_KEY",
-        "LANGGRAPH_HOST",
-        "LANGGRAPH_PORT",
     }
 
     for key in required_keys:
@@ -42,12 +39,10 @@ def test_env_example_documents_provider_split_and_search_keys() -> None:
     assert "Codex/OpenAI-compatible fallback" in env_example
 
 
-def test_langgraph_config_points_to_package_graph_entrypoint() -> None:
-    config = json.loads((ROOT / "langgraph.json").read_text())
-
-    assert config["dependencies"] == ["."]
-    assert config["env"] == ".env"
-    assert config["graphs"] == {"deep_research_agent": "./src/deep_research_agent/graph.py:graph"}
+def test_legacy_langgraph_docs_and_entrypoint_are_absent() -> None:
+    assert not (ROOT / "langgraph.json").exists()
+    assert "LangGraph" not in (ROOT / "docs" / "foundation-configuration.md").read_text()
+    assert "langgraph dev" not in (ROOT / "docs" / "development.md").read_text()
 
 
 def test_foundation_docs_preserve_scope_and_import_compatibility() -> None:

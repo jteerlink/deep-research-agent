@@ -4,14 +4,40 @@ import asyncio
 import json
 from dataclasses import asdict, replace
 
-from src.deep_research_agent.configuration import AgentConfig, ModelProvider, OpenAICompatibleConfig
-from src.deep_research_agent.models import (
+from deep_research_agent.config import (
+    AppConfig,
+    CodexConfig,
+    ModelProvider,
+    OllamaNativeConfig,
+    OllamaOpenAIConfig,
+    OpenAIConfig,
+    SearchConfig,
+)
+from deep_research_agent.models import (
     ConfiguredModelClient,
     FallbackEvent,
     ModelRequest,
     ModelResponse,
     build_model_client,
 )
+
+
+def _config(
+    *,
+    primary_provider: ModelProvider = ModelProvider.OLLAMA_NATIVE,
+    fallback_order: tuple[ModelProvider, ...] = (),
+    openai: OpenAIConfig | None = None,
+    codex: CodexConfig | None = None,
+) -> AppConfig:
+    return AppConfig(
+        primary_provider=primary_provider,
+        fallback_order=fallback_order,
+        ollama_native=OllamaNativeConfig(),
+        ollama_openai=OllamaOpenAIConfig(),
+        openai=openai or OpenAIConfig(),
+        codex=codex or CodexConfig(),
+        search=SearchConfig(),
+    )
 
 
 def test_fallback_event_record_captures_serializable_error_metadata() -> None:
@@ -45,7 +71,10 @@ def test_model_response_defaults_to_empty_fallback_events() -> None:
 
 
 def test_configured_model_client_selects_primary_without_fallback_events() -> None:
-    config = AgentConfig(primary_provider=ModelProvider.OPENAI)
+    config = _config(
+        primary_provider=ModelProvider.OPENAI,
+        openai=OpenAIConfig(api_key="sk-test-openai"),
+    )
     client = build_model_client(config)
 
     response = asyncio.run(client.invoke(ModelRequest(node="researcher", prompt="research acme")))
@@ -59,10 +88,10 @@ def test_configured_model_client_selects_primary_without_fallback_events() -> No
 
 
 def test_configured_model_client_records_fallback_when_primary_model_is_missing() -> None:
-    config = AgentConfig(
-        primary_provider=ModelProvider.CODEX_OPENAI_COMPATIBLE,
+    config = _config(
+        primary_provider=ModelProvider.CODEX,
         fallback_order=(ModelProvider.OPENAI,),
-        openai=OpenAICompatibleConfig(model="gpt-fallback"),
+        openai=OpenAIConfig(model="gpt-fallback", api_key="sk-test-openai"),
     )
     request = ModelRequest(
         node="supervisor",
@@ -76,9 +105,9 @@ def test_configured_model_client_records_fallback_when_primary_model_is_missing(
     assert response.model == "gpt-fallback"
     assert len(response.fallback_events) == 1
     event = response.fallback_events[0]
-    assert event.provider is ModelProvider.CODEX_OPENAI_COMPATIBLE
+    assert event.provider is ModelProvider.CODEX
     assert event.model == ""
-    assert event.trigger == "model_not_configured"
+    assert event.trigger == "missing_model"
     assert event.node == "supervisor"
     assert event.retry_count == 0
     assert response.structured is not None
@@ -89,11 +118,11 @@ def test_configured_model_client_records_fallback_when_primary_model_is_missing(
 
 def test_provider_sequence_deduplicates_primary_from_fallback_order() -> None:
     config = replace(
-        AgentConfig(primary_provider=ModelProvider.OPENAI),
-        fallback_order=(ModelProvider.OPENAI, ModelProvider.CODEX_OPENAI_COMPATIBLE),
+        _config(primary_provider=ModelProvider.OPENAI),
+        fallback_order=(ModelProvider.OPENAI, ModelProvider.CODEX),
     )
 
-    assert ConfiguredModelClient(config).provider_sequence == (
+    assert ConfiguredModelClient(config).provider_order() == (
         ModelProvider.OPENAI,
-        ModelProvider.CODEX_OPENAI_COMPATIBLE,
+        ModelProvider.CODEX,
     )

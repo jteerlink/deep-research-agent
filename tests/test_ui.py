@@ -11,7 +11,6 @@ from deep_research_agent.tiered_runtime import (
     run_tiered_research,
 )
 from deep_research_agent.ui import (
-    build_prospect_directive,
     build_tiered_preview,
     env_file_overlay,
     final_enrichment_csv_bytes,
@@ -112,18 +111,6 @@ def test_model_preflight_from_env_file_uses_runtime_overlay(tmp_path, monkeypatc
     assert payload["live_model_available"] is True
     assert payload["selected_provider"] == "ollama_native"
     assert "from-dotenv" not in str(payload)
-
-
-def test_build_prospect_directive_includes_business_target_context() -> None:
-    assert build_prospect_directive(
-        "dental practices",
-        "Dallas-Fort Worth",
-        "patient reactivation opportunity",
-    ) == (
-        "industry: dental practices\n"
-        "geography: Dallas-Fort Worth\n"
-        "criteria: patient reactivation opportunity"
-    )
 
 
 def test_build_tiered_preview_is_offline_and_query_shaped() -> None:
@@ -581,4 +568,4 @@ def test_ui_imports_when_loaded_as_streamlit_script() -> None:
 
     spec.loader.exec_module(module)
 
-    assert module.DEFAULT_CHECKPOINT_DIR == ".deep_research_agent/checkpoints"
+    assert module.DEFAULT_TIERED_CHECKPOINT_DIR == ".deep_research_agent/tiered_checkpoints"

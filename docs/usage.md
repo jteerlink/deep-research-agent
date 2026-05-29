@@ -1,9 +1,9 @@
 # Usage: local prospect deep research workflow
 
-This repo is a local-first, lean LangGraph/open_deep_research-style prospect
-research agent. The first-pass purpose is prospect target identification:
-ranked target accounts, decision-maker leads, fit rationale, personalized
-angles, and exportable local artifacts.
+This repo is a local-first, lean tiered prospect research agent. The purpose is
+company prospect identification: ranked target accounts, official company
+contact points, fit rationale, personalized angles, and exportable local
+artifacts.
 
 The current implementation is intentionally mock-first/offline-safe. It wires
 the durable workflow, search/evidence contracts, fallback metadata, and artifact
@@ -49,12 +49,11 @@ deep-research-agent ui
 ```
 
 The UI supports target industry/niche, geography, research criteria, target
-prospect count, thread settings, max iterations, checkpoint/artifact
-directories, review approval, search max results/timeout, provider API key
-status from `.env` or shell environment, run/resume/inspect buttons, a progress
-timeline, warnings, evidence/prospect previews, candidate review audit data,
-artifact paths, markdown preview, and raw JSON. Provider keys are not typed into
-the UI.
+prospect count, tiered checkpoint/artifact directories, search max
+results/timeout, provider API key status from `.env` or shell environment,
+tiered run/resume/inspect buttons, a progress timeline, warnings,
+evidence/prospect previews, candidate review audit data, artifact paths,
+markdown preview, and raw JSON. Provider keys are not typed into the UI.
 
 For live prospect discovery, fill at least industry/niche and geography. A broad
 query such as `AI agency lead reactivation targets` tends to find vendor pages or
@@ -75,23 +74,22 @@ reviewed alias-map update can be added later without guessing silently.
 Prospect extraction uses broad deterministic triage before model judgment. The
 triage layer rejects obvious directories, aggregators, social/job pages,
 listicles, review pages, and vendor-noise results; plausible owned-domain
-candidates are judged with structured LLM output when a configured provider is
-available. Use `--no-llm-judgment` for deterministic debugging only.
+candidates are kept review-gated until a human approves the final-enrichment
+selection.
 
 ## Model configuration
 
-There are two compatibility configuration surfaces while the root package and
-`src/` LangGraph shim converge:
+The root package accepts current `DEEP_RESEARCH_*` variables plus older `DRA_*`
+aliases for compatibility:
 
-- Root package/CLI compatibility variables: `DRA_PRIMARY_PROVIDER`,
+- Root package/CLI compatibility variables: `DEEP_RESEARCH_MODEL_PROVIDER`,
+  `DEEP_RESEARCH_FALLBACK_ORDER`, `OLLAMA_NATIVE_BASE_URL`,
+  `OLLAMA_NATIVE_MODEL`, `OLLAMA_API_KEY`, `OLLAMA_OPENAI_BASE_URL`,
+  `OLLAMA_OPENAI_MODEL`, `OPENAI_API_KEY`, `CODEX_OPENAI_MODEL`,
+  `DRA_PRIMARY_PROVIDER`,
   `DRA_OLLAMA_BASE_URL`, `DRA_OLLAMA_MODEL`, `DRA_OLLAMA_OPENAI_BASE_URL`,
   `DRA_OLLAMA_OPENAI_MODEL`, `DRA_OLLAMA_OPENAI_API_KEY`, `OPENAI_API_KEY`,
   `OPENAI_MODEL`, `CODEX_API_KEY`, and `CODEX_MODEL`.
-- `src/` LangGraph shim variables: `DEEP_RESEARCH_MODEL_PROVIDER`,
-  `DEEP_RESEARCH_FALLBACK_ORDER`, `OLLAMA_NATIVE_BASE_URL`,
-  `OLLAMA_NATIVE_MODEL`, `OLLAMA_API_KEY`, `OLLAMA_OPENAI_BASE_URL`,
-  `OLLAMA_OPENAI_MODEL`, `OPENAI_API_KEY`, `CODEX_OPENAI_MODEL`, and
-  related fallback keys.
 
 For the intended Ollama Cloud DeepSeek Pro path, set:
 
@@ -111,45 +109,50 @@ used by this app; direct Ollama model calls should go through Ollama Cloud with
 
 ## Offline workflow smoke
 
-Use `--mock-result` to exercise graph routing, local checkpointing, review
-interrupts, and resume without live network calls:
+Use `--mock-result` to exercise tiered local checkpointing, review interrupts,
+and resume without live network calls:
 
 ```bash
 CHECKPOINT_DIR=$(mktemp -d)
-python -m deep_research_agent run \
-  "AI agency lead reactivation targets" \
-  --thread-id demo-prospect-thread \
+ARTIFACT_DIR=$(mktemp -d)
+python -m deep_research_agent tiered-run \
+  --industry "dental practices" \
+  --geography "Dallas-Fort Worth" \
+  --criteria "patient reactivation opportunity" \
+  --thread-id demo-tiered-thread \
   --checkpoint-dir "$CHECKPOINT_DIR" \
-  --artifact-dir artifacts/demo \
-  --require-review \
-  --mock-result "Acme Dental|https://example.com/acme|Growing DSO with reactivation need|duckduckgo"
+  --artifact-dir "$ARTIFACT_DIR" \
+  --mock-result "Acme Dental|https://example.com/acme|Growing DSO with reactivation need|duckduckgo" \
+  --json
 
-python -m deep_research_agent resume \
-  demo-prospect-thread \
+python -m deep_research_agent tiered-inspect \
+  demo-tiered-thread \
   --checkpoint-dir "$CHECKPOINT_DIR" \
-  --artifact-dir artifacts/demo \
-  --approve-review
+  --json
 
-python -m deep_research_agent inspect \
-  --thread-id demo-prospect-thread \
-  --checkpoint-dir "$CHECKPOINT_DIR"
+python -m deep_research_agent tiered-resume \
+  demo-tiered-thread \
+  --checkpoint-dir "$CHECKPOINT_DIR" \
+  --artifact-dir "$ARTIFACT_DIR" \
+  --json
 ```
 
 Expected results:
 
-- `run` returns JSON with `status: "interrupted"`, a stable `thread_id`,
-  evidence from the mocked search result, model metadata, and review interrupt
-  details.
+- `tiered-run` returns JSON with `status: "review_required"`, a stable
+  `thread_id`, evidence from the mocked search result, companies, contact-point
+  placeholders when contact info is still needed, and artifact paths.
 - Live runs expand the directive into multiple company-discovery searches and
   stop when enough deduplicated potential business targets are found or when the
   iteration limit is reached.
-- `resume --approve-review` returns JSON with `status: "completed"` for the
-  same thread id, preserving checkpointed evidence and prospect targets.
-- `inspect --thread-id` returns the persisted checkpoint state from the same
-  local JSON checkpoint file.
+- `tiered-resume` without approval preserves the review-required state; with an
+  approval JSON and enabled final enrichment, it writes the approved final
+  enrichment artifacts.
+- `tiered-inspect` returns the persisted checkpoint state from the same local
+  JSON checkpoint file.
 
-The default checkpoint directory is `.deep_research_agent/checkpoints`; pass
-`--checkpoint-dir` for tests or throwaway runs.
+The default checkpoint directory is `.deep_research_agent/tiered_checkpoints`;
+pass `--checkpoint-dir` for tests or throwaway runs.
 
 ## Exportable artifacts
 
@@ -176,6 +179,27 @@ Snippet evidence must stay marked as `snippet`; only fetched/read page evidence
 should be marked as `page_read`. Prospect fit rationale and personalized angles
 should cite evidence IDs or be clearly marked as low-confidence human-review
 inferences.
+
+## Compatibility and migration boundaries
+
+The supported workflow is the tiered command family:
+`tiered-preview`, `tiered-run`, `tiered-inspect`, and `tiered-resume`.
+The older generic `run`, `resume`, and `inspect` commands have been removed; if
+called, the CLI exits non-zero with migration guidance instead of silently
+reviving the deprecated workflow.
+
+These compatibility surfaces intentionally remain because they protect current
+operator and test workflows:
+
+- `async_multi_search.py` and package `deep_research_agent.search` preserve the
+  existing search import path.
+- Config aliases such as `DRA_PRIMARY_PROVIDER` remain lower-priority shims for
+  older local `.env` files.
+- Model fallback metadata remains available for redacted diagnostics and
+  offline-safe model status checks.
+- Legacy contact-payload guards reject stale person-contact artifacts that lack
+  the current company contact-point semantics, rather than migrating ambiguous
+  data silently.
 
 ## Optional live smoke
 

@@ -25,18 +25,6 @@ try:
     from .config import dotenv_values
     from .final_enrichment import enrich_selected_prospects
     from .geography import normalize_geography
-    from .graph import (
-        DEFAULT_TARGET_PROSPECT_COUNT,
-        MAX_MODEL_TIMEOUT_SECONDS,
-        MAX_SEARCH_ITERATIONS,
-        MAX_SEARCH_RESULTS_PER_ITERATION,
-        MAX_SEARCH_TIMEOUT_SECONDS,
-        MAX_TARGET_PROSPECT_COUNT,
-        derive_prospect_run_budget,
-        inspect_checkpoints,
-        resume_research,
-        run_research,
-    )
     from .models import build_model_client
     from .tiered_models import ApprovedProspectSelection
     from .tiered_runtime import (
@@ -50,6 +38,12 @@ try:
         run_tiered_research_with_search,
     )
     from .tiered_search import (
+        DEFAULT_TARGET_PROSPECT_COUNT,
+        MAX_MODEL_TIMEOUT_SECONDS,
+        MAX_SEARCH_ITERATIONS,
+        MAX_SEARCH_RESULTS_PER_ITERATION,
+        MAX_SEARCH_TIMEOUT_SECONDS,
+        MAX_TARGET_PROSPECT_COUNT,
         CompanySearchTarget,
         ContactSearchTarget,
         ProviderPolicy,
@@ -58,6 +52,7 @@ try:
         build_company_discovery_queries,
         build_contact_discovery_queries,
         build_personalization_queries,
+        derive_prospect_run_budget,
     )
 except ImportError:
     if __package__:
@@ -66,18 +61,6 @@ except ImportError:
     from deep_research_agent.config import dotenv_values
     from deep_research_agent.final_enrichment import enrich_selected_prospects
     from deep_research_agent.geography import normalize_geography
-    from deep_research_agent.graph import (
-        DEFAULT_TARGET_PROSPECT_COUNT,
-        MAX_MODEL_TIMEOUT_SECONDS,
-        MAX_SEARCH_ITERATIONS,
-        MAX_SEARCH_RESULTS_PER_ITERATION,
-        MAX_SEARCH_TIMEOUT_SECONDS,
-        MAX_TARGET_PROSPECT_COUNT,
-        derive_prospect_run_budget,
-        inspect_checkpoints,
-        resume_research,
-        run_research,
-    )
     from deep_research_agent.models import build_model_client
     from deep_research_agent.tiered_models import ApprovedProspectSelection
     from deep_research_agent.tiered_runtime import (
@@ -91,6 +74,12 @@ except ImportError:
         run_tiered_research_with_search,
     )
     from deep_research_agent.tiered_search import (
+        DEFAULT_TARGET_PROSPECT_COUNT,
+        MAX_MODEL_TIMEOUT_SECONDS,
+        MAX_SEARCH_ITERATIONS,
+        MAX_SEARCH_RESULTS_PER_ITERATION,
+        MAX_SEARCH_TIMEOUT_SECONDS,
+        MAX_TARGET_PROSPECT_COUNT,
         CompanySearchTarget,
         ContactSearchTarget,
         ProviderPolicy,
@@ -99,6 +88,7 @@ except ImportError:
         build_company_discovery_queries,
         build_contact_discovery_queries,
         build_personalization_queries,
+        derive_prospect_run_budget,
     )
 
 PROVIDER_API_KEY_FIELDS: tuple[tuple[str, str], ...] = (
@@ -109,8 +99,6 @@ PROVIDER_API_KEY_FIELDS: tuple[tuple[str, str], ...] = (
     ("You.com Developer Cloud", "YDC_API_KEY"),
 )
 
-DEFAULT_CHECKPOINT_DIR = ".deep_research_agent/checkpoints"
-DEFAULT_ARTIFACT_DIR = ".deep_research_agent/artifacts"
 TIERED_SELECTION_SESSION_KEY = "tiered_prospect_selections"
 
 
@@ -149,19 +137,6 @@ def provider_env_from_env_file(
     merged = dotenv_values(path) if os.fspath(path).strip() else {}
     merged.update(current)
     return provider_env_overlay(merged)
-
-
-def build_prospect_directive(industry: str, geography: str, criteria: str) -> str:
-    """Build the structured free-text directive consumed by the research graph."""
-
-    parts = []
-    if industry.strip():
-        parts.append(f"industry: {industry.strip()}")
-    if geography.strip():
-        parts.append(f"geography: {geography.strip()}")
-    if criteria.strip():
-        parts.append(f"criteria: {criteria.strip()}")
-    return "\n".join(parts) if parts else "criteria: business prospects"
 
 
 def build_tiered_preview(
@@ -235,7 +210,7 @@ def build_tiered_preview(
         "warnings": [
             "Preview only: no network search, browser capture, enrichment, "
             "or outreach is executed.",
-            "Early tiered discovery excludes the legacy default provider chain.",
+            "Early tiered discovery excludes the default async search provider chain.",
         ],
     }
 
@@ -913,8 +888,6 @@ def render_app() -> None:
 
     if "events" not in st.session_state:
         st.session_state.events = []
-    if "last_state" not in st.session_state:
-        st.session_state.last_state = None
     if "last_tiered_state" not in st.session_state:
         st.session_state.last_tiered_state = None
     if TIERED_SELECTION_SESSION_KEY not in st.session_state:
@@ -964,17 +937,9 @@ def render_app() -> None:
             )
 
         active_budget = derived_budget
-        legacy_checkpoint_dir = DEFAULT_CHECKPOINT_DIR
-        legacy_artifact_dir = DEFAULT_ARTIFACT_DIR
-        require_review = True
-        approve_review = False
-        enable_llm_judgment = True
-        with st.expander("Advanced / Legacy G003", expanded=False):
+        with st.expander("Advanced tiered runtime controls", expanded=False):
             st.caption(
-                "Legacy G003 remains available for compatibility; the main workflow is tiered."
-            )
-            st.caption(
-                "Budget: "
+                "Tiered search budget: "
                 f"{derived_budget.max_iterations} searches, "
                 f"{derived_budget.max_results} results/search, "
                 f"{derived_budget.search_timeout_seconds}s search timeout, "
@@ -1017,17 +982,6 @@ def render_app() -> None:
                 )
             else:
                 active_budget = derived_budget
-            legacy_checkpoint_dir = st.text_input(
-                "Legacy G003 checkpoint dir",
-                DEFAULT_CHECKPOINT_DIR,
-            )
-            legacy_artifact_dir = st.text_input("Legacy G003 artifact dir", DEFAULT_ARTIFACT_DIR)
-            require_review = st.checkbox("Require review", value=True)
-            approve_review = st.checkbox("Approve review", value=False)
-            enable_llm_judgment = st.checkbox("LLM prospect judgment", value=True)
-            run_clicked = st.button("Run G003", width="stretch")
-            resume_clicked = st.button("Resume G003", width="stretch")
-            inspect_clicked = st.button("Inspect G003", width="stretch")
 
         st.header("Environment")
         env_file = st.text_input("Env file", ".env")
@@ -1095,7 +1049,6 @@ def render_app() -> None:
                     )
             st.session_state.events = list(checkpoint.events)
             st.session_state.last_tiered_state = checkpoint.to_dict()
-            st.session_state.last_state = None
             prospect_count = len(flatten_tiered_prospect_rows(checkpoint))
             st.success(
                 f"Tiered run {checkpoint.status}: {checkpoint.thread_id}; "
@@ -1113,7 +1066,6 @@ def render_app() -> None:
                 )
                 st.session_state.events = list(checkpoint.events)
                 st.session_state.last_tiered_state = checkpoint.to_dict()
-                st.session_state.last_state = None
                 st.success(f"Resumed tiered {checkpoint.status}: {thread_id}")
 
         if tiered_inspect_clicked:
@@ -1126,73 +1078,13 @@ def render_app() -> None:
                 )
                 st.session_state.events = list(checkpoint.events)
                 st.session_state.last_tiered_state = checkpoint.to_dict()
-                st.session_state.last_state = None
                 st.info(f"Loaded tiered checkpoint: {thread_id}")
 
-        if run_clicked:
-            st.session_state.events = []
-            searcher = AsyncMultiProviderSearch(timeout=int(active_budget.search_timeout_seconds))
-            research_query = build_prospect_directive(industry, geography, query)
-            with temporary_env(runtime_env):
-                state = asyncio.run(
-                    run_research(
-                        research_query,
-                        thread_id=thread_id or None,
-                        checkpoint_dir=legacy_checkpoint_dir,
-                        search=searcher.search,
-                        require_review=require_review,
-                        max_iterations=active_budget.max_iterations,
-                        max_results=active_budget.max_results,
-                        target_prospect_count=active_budget.target_prospect_count,
-                        search_timeout_seconds=active_budget.search_timeout_seconds,
-                        model_timeout_seconds=active_budget.model_timeout_seconds,
-                        enable_llm_judgment=bool(enable_llm_judgment),
-                        progress_callback=progress,
-                        review_approved=approve_review,
-                        artifact_dir=legacy_artifact_dir,
-                    )
-                )
-            st.session_state.last_state = state
-            st.session_state.last_tiered_state = None
-            st.success(f"Run {state.get('status', 'finished')}: {state.get('thread_id')}")
-
-        if resume_clicked:
-            if not thread_id:
-                st.error("Thread ID is required to resume.")
-            else:
-                st.session_state.events = []
-                searcher = AsyncMultiProviderSearch(
-                    timeout=int(active_budget.search_timeout_seconds)
-                )
-                with temporary_env(runtime_env):
-                    state = asyncio.run(
-                        resume_research(
-                            thread_id,
-                            checkpoint_dir=legacy_checkpoint_dir,
-                            approve_review=approve_review,
-                            search=searcher.search,
-                            max_results=active_budget.max_results,
-                            progress_callback=progress,
-                            artifact_dir=legacy_artifact_dir,
-                        )
-                    )
-                st.session_state.last_state = state
-                st.session_state.last_tiered_state = None
-                st.success(f"Resumed {state.get('status', 'finished')}: {thread_id}")
-
-        if inspect_clicked:
-            if not thread_id:
-                st.error("Thread ID is required to inspect.")
-            else:
-                state = inspect_checkpoints(thread_id, checkpoint_dir=legacy_checkpoint_dir)
-                st.session_state.last_state = state
-                st.session_state.last_tiered_state = None
-                st.info(f"Loaded checkpoint: {thread_id}")
     except Exception as exc:  # pragma: no cover - exercised manually through Streamlit
         st.exception(exc)
 
     tiered_state = st.session_state.last_tiered_state
-    state = tiered_state or st.session_state.last_state
+    state = tiered_state
     preview = result_preview(state or {})
 
     status_col, warning_col, artifact_col = st.columns(3)
@@ -1325,7 +1217,6 @@ def render_app() -> None:
                             )
                         st.session_state.events = list(enriched.events)
                         st.session_state.last_tiered_state = enriched.to_dict()
-                        st.session_state.last_state = None
                         st.success(
                             f"Exa enrichment complete: {len(enriched.final_enrichment)} record(s)."
                         )

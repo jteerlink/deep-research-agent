@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 import pytest
@@ -20,7 +19,7 @@ def _parse_env_example(path: Path) -> dict[str, str]:
 def test_env_example_documents_explicit_model_provider_split():
     env_example = ROOT / ".env.example"
     if not env_example.exists():
-        pytest.skip(".env.example is created by the env/langgraph/docs lane")
+        pytest.skip(".env.example is created by the env/docs lane")
 
     values = _parse_env_example(env_example)
 
@@ -42,13 +41,6 @@ def test_env_example_documents_explicit_model_provider_split():
     assert values["OLLAMA_OPENAI_API_KEY"] == ""
 
 
-def test_langgraph_config_points_to_package_graph_entrypoint():
-    langgraph_config = ROOT / "langgraph.json"
-    if not langgraph_config.exists():
-        pytest.skip("langgraph.json is created by the env/langgraph/docs lane")
-
-    config = json.loads(langgraph_config.read_text())
-
-    assert config["dependencies"] == ["."]
-    assert config["env"] == ".env"
-    assert config["graphs"]["deep_research_agent"] == "./src/deep_research_agent/graph.py:graph"
+def test_legacy_langgraph_entrypoint_is_removed() -> None:
+    assert not (ROOT / "langgraph.json").exists()
+    assert not (ROOT / "src" / "deep_research_agent" / "graph.py").exists()

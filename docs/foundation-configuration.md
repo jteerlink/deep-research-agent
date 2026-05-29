@@ -1,16 +1,16 @@
 # Foundation and configuration
 
-This repository starts as a local-first deep research agent. The G001 foundation
-keeps configuration explicit and small so later graph, model, and CLI work can be
-added without a hosted UI, database service, or multi-user runtime.
+This repository starts as a local-first deep research agent. The foundation
+keeps configuration explicit and small so tiered prospect, model, and CLI work
+can be added without a hosted UI, database service, or multi-user runtime.
 
 ## Local configuration files
 
 - `.env.example` documents every supported environment variable and is safe to
   commit.
 - `.env` is the developer-local copy and must stay untracked.
-- `langgraph.json` is the LangGraph dev-server entry point and points at the
-  package graph module expected by the package skeleton.
+- Tiered checkpoints and artifacts are local JSON/CSV/Markdown files under
+  `.deep_research_agent/` by default.
 
 ## Model provider split
 
@@ -54,41 +54,26 @@ python -m pip install -e '.[ui]'
 deep-research-agent ui
 ```
 
-The UI is a local operator surface over the same checkpointed workflow. It
+The UI is a local operator surface over the same tiered workflow. It
 reads provider API keys from `.env` or shell environment, captures target
 industry/niche, geography, research criteria, and target prospect count, exposes
 search max-results/timeout controls, and previews progress events, evidence,
 prospects, candidate review decisions, artifact paths, markdown, and raw JSON
 without asking for secrets in the browser.
 
+## Tiered local workflow checkpoints
 
-## G003 local workflow checkpoints
+The tiered workflow keeps a local execution contract for development and tests:
 
-The G003 workflow keeps the LangGraph entry point import-safe while adding a
-local nested execution contract for development and tests:
+- `tiered-preview` expands industry/geography criteria into query templates
+  without network access.
+- `tiered-run` writes a `tiered.prospect_checkpoint.v1` JSON checkpoint and
+  review-ready artifacts.
+- `tiered-inspect` loads the saved checkpoint by thread id.
+- `tiered-resume` applies reviewer approval and optional final enrichment.
 
-```text
-main -> supervisor -> researcher -> supervisor/review
-```
-
-`python -m deep_research_agent run <query>` writes a JSON checkpoint containing
-the thread id, supervisor delegation event, researcher iteration events, model
-fallback metadata, sufficiency or max-iteration routing, and the review
-interrupt. `resume <thread-id>` reloads that same local checkpoint and completes
-the review gate; `inspect <thread-id>` prints the saved state. The default
-checkpoint directory is `.deep_research_agent/checkpoints`, and each command
-accepts `--checkpoint-dir` for isolated test runs.
+The default checkpoint directory is `.deep_research_agent/tiered_checkpoints`,
+and each command accepts `--checkpoint-dir` for isolated test runs.
 
 This remains a local-first development surface: no hosted UI, no model zoo, no
 database service, and no multi-user runtime are introduced by checkpointing.
-
-## LangGraph entry point
-
-`langgraph.json` declares the graph as:
-
-```text
-./src/deep_research_agent/graph.py:graph
-```
-
-Until the graph implementation grows beyond the foundation story, this entry
-point should remain lightweight and import-safe. Avoid adding a hosted UI, no model zoo, database, or multi-user service assumptions to the foundation layer.

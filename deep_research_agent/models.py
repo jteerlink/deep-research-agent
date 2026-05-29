@@ -1,6 +1,6 @@
-"""Provider-neutral model metadata and fallback contracts for graph execution.
+"""Provider-neutral model metadata and fallback contracts.
 
-The G003 workflow needs auditable provider/model metadata without requiring live
+The local runtime needs auditable provider/model metadata without requiring live
 hosted model calls. This module keeps that boundary import-safe: it records why
 fallbacks were selected and returns deterministic placeholder responses that
 future live transports can replace behind the same interface.
@@ -314,13 +314,14 @@ class ConfiguredModelClient:
 
         fallback_events: list[FallbackEvent] = []
         for retry_count, provider in enumerate(self.provider_order()):
-            model = self.provider_model(provider)
-            if not self.provider_available(provider):
+            status = self.provider_status(provider)
+            model = status.model
+            if not status.available:
                 fallback_events.append(
                     FallbackEvent.record(
                         provider=provider,
                         model=model,
-                        trigger="missing_api_key",
+                        trigger=status.unavailable_reason or "unavailable",
                         node=request.node,
                         retry_count=retry_count,
                     )
@@ -333,7 +334,11 @@ class ConfiguredModelClient:
                 structured={
                     "node": request.node,
                     "status": "metadata_only",
-                    "message": "Live model transport is not enabled in the local G003 workflow.",
+                    "message": "Live model transport is not enabled for metadata-only calls.",
+                    "selected_provider": provider.value,
+                    "selected_model": model,
+                    "fallback_used": bool(fallback_events),
+                    "fallback_events": [event.to_dict() for event in fallback_events],
                     "request_metadata": dict(request.metadata),
                 },
                 fallback_events=tuple(fallback_events),
@@ -349,6 +354,10 @@ class ConfiguredModelClient:
                 "node": request.node,
                 "status": "no_available_model",
                 "message": "No local model metadata provider was selectable.",
+                "selected_provider": self.primary_provider.value,
+                "selected_model": self.primary_model,
+                "fallback_used": bool(fallback_events),
+                "fallback_events": [event.to_dict() for event in fallback_events],
                 "request_metadata": dict(request.metadata),
             },
             fallback_events=tuple(fallback_events),

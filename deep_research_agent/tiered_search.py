@@ -3,7 +3,7 @@
 The tiered workflow starts with broad company discovery before spending budget on
 contact and person-level enrichment.  This module intentionally keeps the search
 provider boundary injectable so early tiers and tests can run without
-constructing the legacy ``AsyncMultiProviderSearch`` provider chain.
+constructing the default ``AsyncMultiProviderSearch`` provider chain.
 """
 
 from __future__ import annotations
@@ -18,6 +18,14 @@ EARLY_DISCOVERY_PROVIDERS = ("tavily", "serper", "firecrawl", "ydc", "duckduckgo
 FINAL_ENRICHMENT_PROVIDERS = ("exa",)
 DEFAULT_MAX_PARALLEL_SEARCH_LANES = 3
 MAX_PARALLEL_SEARCH_LANES = 6
+DEFAULT_TARGET_PROSPECT_COUNT = 10
+MAX_TARGET_PROSPECT_COUNT = 100
+MAX_SEARCH_ITERATIONS = 10
+MAX_SEARCH_RESULTS_PER_ITERATION = 50
+MAX_RAW_SEARCH_RESULTS_PER_RUN = 300
+MAX_MODEL_JUDGMENTS_PER_RUN = 150
+MAX_SEARCH_TIMEOUT_SECONDS = 30
+MAX_MODEL_TIMEOUT_SECONDS = 120
 
 
 class SearchResultLike(Protocol):
@@ -58,7 +66,7 @@ class TieredSearchDirective:
 
     industry: str
     geographic_area: str
-    target_prospect_count: int = 10
+    target_prospect_count: int = DEFAULT_TARGET_PROSPECT_COUNT
     research_criteria: str = ""
     preferred_contact_roles: tuple[str, ...] = ()
     source_preferences: tuple[str, ...] = ()
@@ -174,6 +182,22 @@ class TieredSearchBatch:
         }
 
 
+@dataclass(frozen=True)
+class ProspectRunBudget:
+    """Bounded tiered-search knobs derived from the requested prospect count."""
+
+    requested_target_prospect_count: int
+    target_prospect_count: int
+    max_iterations: int
+    max_results: int
+    raw_search_max_results: int
+    search_timeout_seconds: int
+    model_timeout_seconds: int
+    max_model_judgments: int
+    estimated_raw_search_results: int
+    warnings: tuple[str, ...] = ()
+
+
 def _dedupe_preserve_order(values: Iterable[str]) -> tuple[str, ...]:
     seen: set[str] = set()
     deduped: list[str] = []
@@ -184,6 +208,138 @@ def _dedupe_preserve_order(values: Iterable[str]) -> tuple[str, ...]:
             seen.add(key)
             deduped.append(normalized)
     return tuple(deduped)
+
+
+def _ceil_div(numerator: int, denominator: int) -> int:
+    return (numerator + denominator - 1) // denominator
+
+
+def _positive_int(value: Any, default: int, *, label: str, warnings: list[str]) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        warnings.append(f"{label} defaulted to {default} because it was not an integer")
+        return default
+    if number < 1:
+        warnings.append(f"{label} raised to 1 because run budgets require positive values")
+        return 1
+    return number
+
+
+def _bounded_budget_value(
+    value: int | None,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+    label: str,
+    warnings: list[str],
+) -> int:
+    if value is None:
+        return default
+    number = _positive_int(value, default, label=label, warnings=warnings)
+    if number < minimum:
+        warnings.append(f"{label} raised to {minimum} by run guardrail")
+        return minimum
+    if number > maximum:
+        warnings.append(f"{label} capped at {maximum} by run guardrail")
+        return maximum
+    return number
+
+
+def derive_prospect_run_budget(
+    target_prospect_count: int,
+    *,
+    max_iterations: int | None = None,
+    max_results: int | None = None,
+    search_timeout_seconds: int | None = None,
+    model_timeout_seconds: int | None = None,
+) -> ProspectRunBudget:
+    """Return bounded runtime knobs for tiered company discovery."""
+
+    warnings: list[str] = []
+    requested_target = _positive_int(
+        target_prospect_count,
+        DEFAULT_TARGET_PROSPECT_COUNT,
+        label="target_prospect_count",
+        warnings=warnings,
+    )
+    target = min(requested_target, MAX_TARGET_PROSPECT_COUNT)
+    if target != requested_target:
+        warnings.append(
+            f"target_prospect_count capped at {MAX_TARGET_PROSPECT_COUNT} by run guardrail"
+        )
+
+    derived_iterations = min(MAX_SEARCH_ITERATIONS, max(1, _ceil_div(target, 8) + 1))
+    iterations = _bounded_budget_value(
+        max_iterations,
+        default=derived_iterations,
+        minimum=1,
+        maximum=MAX_SEARCH_ITERATIONS,
+        label="max_iterations",
+        warnings=warnings,
+    )
+
+    desired_raw_pool = min(MAX_RAW_SEARCH_RESULTS_PER_RUN, max(target * 4, target + 10))
+    derived_results = min(
+        MAX_SEARCH_RESULTS_PER_ITERATION,
+        max(5, _ceil_div(desired_raw_pool, iterations)),
+    )
+    results = _bounded_budget_value(
+        max_results,
+        default=derived_results,
+        minimum=1,
+        maximum=MAX_SEARCH_RESULTS_PER_ITERATION,
+        label="max_results",
+        warnings=warnings,
+    )
+    if results * iterations > MAX_RAW_SEARCH_RESULTS_PER_RUN:
+        capped_results = max(1, MAX_RAW_SEARCH_RESULTS_PER_RUN // iterations)
+        if capped_results < results:
+            results = capped_results
+            warnings.append(
+                f"raw search budget capped at {MAX_RAW_SEARCH_RESULTS_PER_RUN} results per run"
+            )
+
+    search_timeout = _bounded_budget_value(
+        search_timeout_seconds,
+        default=min(
+            MAX_SEARCH_TIMEOUT_SECONDS,
+            10 + (_ceil_div(max(target - 10, 0), 10) * 2),
+        ),
+        minimum=1,
+        maximum=MAX_SEARCH_TIMEOUT_SECONDS,
+        label="search_timeout_seconds",
+        warnings=warnings,
+    )
+    model_timeout = _bounded_budget_value(
+        model_timeout_seconds,
+        default=min(
+            MAX_MODEL_TIMEOUT_SECONDS,
+            60 + (_ceil_div(max(target - 10, 0), 10) * 5),
+        ),
+        minimum=1,
+        maximum=MAX_MODEL_TIMEOUT_SECONDS,
+        label="model_timeout_seconds",
+        warnings=warnings,
+    )
+    max_model_judgments = min(
+        MAX_MODEL_JUDGMENTS_PER_RUN,
+        max(10, target * 3),
+        MAX_RAW_SEARCH_RESULTS_PER_RUN,
+    )
+    return ProspectRunBudget(
+        requested_target_prospect_count=requested_target,
+        target_prospect_count=target,
+        max_iterations=iterations,
+        max_results=results,
+        raw_search_max_results=results,
+        search_timeout_seconds=search_timeout,
+        model_timeout_seconds=model_timeout,
+        max_model_judgments=max_model_judgments,
+        estimated_raw_search_results=iterations * results,
+        warnings=tuple(dict.fromkeys(warnings)),
+    )
 
 
 def build_company_discovery_queries(directive: TieredSearchDirective) -> tuple[str, ...]:

@@ -1,9 +1,9 @@
 # Deep Research Agent
 
-Foundation package for a local-first deep research agent. The skeleton keeps the
-existing `async_multi_search.py` import path working while adding a package entry
-point, environment-driven model configuration, LangGraph configuration, and a
-local G003 workflow runner with durable thread checkpoints.
+Foundation package for a local-first tiered prospect research agent. The package
+keeps the existing `async_multi_search.py` import path working while centering
+the review-gated `tiered-preview`, `tiered-run`, `tiered-inspect`, and
+`tiered-resume` workflow.
 
 ## Quick start
 
@@ -15,7 +15,7 @@ python -m deep_research_agent search-providers
 ```
 
 See [docs/usage.md](docs/usage.md) for offline smoke, optional live smoke,
-checkpoint/resume, and artifact examples.
+tiered checkpoint/resume, and artifact examples.
 
 Optional local UI:
 
@@ -72,49 +72,9 @@ python -m deep_research_agent tiered-preview \
 
 The preview does not perform network search, browser capture, enrichment, or
 outreach. Early tiered discovery is intentionally wired around injected search
-callables so it does not instantiate the legacy `AsyncMultiProviderSearch()`
-default provider chain; Exa remains reserved for approved final enrichment.
-
-## Local G003 workflow
-
-The G003 runner models the nested workflow topology locally without a hosted UI
-or database:
-
-```text
-main -> supervisor -> researcher -> supervisor/review
-```
-
-Start a run and stop at the review interrupt:
-
-```bash
-python -m deep_research_agent run "find AI agencies" --thread-id demo-thread
-```
-
-For a deterministic offline run with mocked search evidence:
-
-```bash
-python -m deep_research_agent run "find AI agencies" \
-  --thread-id demo-thread \
-  --require-review \
-  --artifact-dir artifacts/demo \
-  --mock-result "Acme|https://example.com/acme|Acme builds reactivation tooling|duckduckgo"
-```
-
-Inspect the durable JSON checkpoint:
-
-```bash
-python -m deep_research_agent inspect demo-thread
-```
-
-Resume the same thread id and approve the review gate:
-
-```bash
-python -m deep_research_agent resume demo-thread
-```
-
-By default checkpoints are written under `.deep_research_agent/checkpoints`.
-Use `--checkpoint-dir <path>` on `run`, `resume`, or `inspect` for test or
-scratch directories.
+callables so it does not instantiate the default `AsyncMultiProviderSearch()`
+provider chain during early discovery; Exa remains reserved for approved final
+enrichment.
 
 ## Provider configuration
 
@@ -144,9 +104,7 @@ results. Plausible owned-domain candidates then go through structured LLM
 judgment when a configured provider is available, with deterministic fallback for
 offline runs.
 
-Use `deep-research-agent model-status` before long prospect runs to verify the
-redacted live-model configuration. `--live-smoke` performs an optional structured
-JSON call against the first available hosted provider. Add `--require-live-model`
-to `run` or `resume` when export-qualified prospects are required; without it,
-offline or unavailable model paths remain review-only and deterministic fallback
-will not satisfy export qualification.
+Use `deep-research-agent model-status` before model-assisted prospect work to
+verify the redacted live-model configuration. `--live-smoke` performs an
+optional structured JSON call against the first available hosted provider. Tiered
+runs remain review-gated and offline-testable when hosted models are unavailable.

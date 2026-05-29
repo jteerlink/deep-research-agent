@@ -289,8 +289,7 @@ Suggested browser artifact fields:
 
 ## Proposed workflow shape
 
-The current local workflow can be adapted from one generic `researcher` loop into
-explicit tier nodes:
+The current local workflow is organized around explicit tier stages:
 
 ```text
 main
@@ -448,8 +447,8 @@ python -m deep_research_agent tiered-preview \
   --json
 ```
 
-The commands and Streamlit preview helper do not instantiate the legacy
-`AsyncMultiProviderSearch()` default provider chain for early tiered discovery,
-launch a browser, export CRM data, or generate outreach. Runtime tier execution
-keeps the injected-client boundary so early discovery can exclude Exa until a
+The commands and Streamlit preview helper do not instantiate the default
+`AsyncMultiProviderSearch()` provider chain for early tiered discovery, launch a
+browser, export CRM data, or generate outreach. Runtime tier execution keeps the
+injected-client boundary so early discovery can exclude Exa until a
 human-approved enrichment phase.

@@ -20,9 +20,6 @@ dependencies = [
 search = [
   "ddgs>=9.0",
 ]
-langgraph = [
-  "langgraph>=0.2",
-]
 ui = [
   "ddgs>=9.0",
   "streamlit>=1.36",

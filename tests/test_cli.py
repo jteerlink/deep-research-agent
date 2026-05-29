@@ -26,9 +26,9 @@ def test_module_cli_help() -> None:
 
     assert "Local-first deep research agent foundation" in result.stdout
     assert "config" in result.stdout
-    assert "run" in result.stdout
-    assert "resume" in result.stdout
-    assert "inspect" in result.stdout
+    assert " run " not in result.stdout
+    assert " resume " not in result.stdout
+    assert " inspect " not in result.stdout
     assert "tiered-run" in result.stdout
     assert "tiered-resume" in result.stdout
     assert "tiered-inspect" in result.stdout
@@ -278,7 +278,7 @@ def test_cli_model_status_json_reports_redacted_missing_ollama_key(tmp_path) -> 
     assert "secret" not in result.stdout.lower()
 
 
-def test_cli_run_require_live_model_fails_before_mock_search_without_stacktrace(
+def test_cli_legacy_run_command_is_removed_with_migration_guidance(
     tmp_path,
 ) -> None:
     result = subprocess.run(
@@ -288,9 +288,6 @@ def test_cli_run_require_live_model_fails_before_mock_search_without_stacktrace(
             "deep_research_agent",
             "run",
             "industry: HVAC\ngeography: North Texas",
-            "--require-live-model",
-            "--mock-result",
-            "Actual HVAC|https://actualhvac.com|We provide AC repair|tavily",
         ],
         check=False,
         capture_output=True,
@@ -299,6 +296,37 @@ def test_cli_run_require_live_model_fails_before_mock_search_without_stacktrace(
         cwd=tmp_path,
     )
 
-    assert result.returncode != 0
-    assert "Live model required" in result.stderr
+    assert result.returncode == 2
+    assert "legacy `run` workflow command was removed" in result.stderr
+    assert "tiered-run" in result.stderr
+    assert "invalid choice" not in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_cli_legacy_resume_and_inspect_commands_are_removed_with_guidance(
+    tmp_path,
+) -> None:
+    for legacy_command, tiered_command in {
+        "resume": "tiered-resume",
+        "inspect": "tiered-inspect",
+    }.items():
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "deep_research_agent",
+                legacy_command,
+                "legacy-thread",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=_isolated_env(),
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 2
+        assert f"legacy `{legacy_command}` workflow command was removed" in result.stderr
+        assert tiered_command in result.stderr
+        assert "invalid choice" not in result.stderr
+        assert "Traceback" not in result.stderr

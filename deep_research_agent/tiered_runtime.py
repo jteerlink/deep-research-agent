@@ -1,9 +1,9 @@
 """Local tiered prospect run/resume/inspect runtime.
 
-This sidecar runtime gives the tiered workflow a durable, offline-testable
-execution surface without changing the existing generic G003 graph. Network,
-browser, model, and final-enrichment providers stay outside this module; tests
-and demos inject mock records through CLI flags or JSON files.
+This runtime gives the tiered workflow a durable, offline-testable execution
+surface. Network, browser, model, and final-enrichment providers stay outside
+this module; tests and demos inject mock records through CLI flags or JSON
+files.
 """
 
 from __future__ import annotations
