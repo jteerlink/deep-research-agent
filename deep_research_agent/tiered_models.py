@@ -16,6 +16,7 @@ EvidenceDepth = Literal["fast", "standard", "deep"]
 BrowserCaptureMode = Literal["none", "screenshots_only", "text_extraction", "full_page_audit"]
 SourceConfidence = Literal["low", "medium", "high"]
 RoleCategory = Literal["owner", "executive", "operator", "marketing", "unknown"]
+ContactKind = Literal["person", "company_email", "company_phone", "company_contact_page"]
 SignalConfidence = Literal["low", "medium", "high"]
 TieredWorkflowStatus = Literal[
     "running",
@@ -135,6 +136,12 @@ class ContactCandidate:
     phone: str | None = None
     contact_confidence: float = 0.0
     notes: str = ""
+    contact_kind: ContactKind = "person"
+    label: str = ""
+    url: str = ""
+    contact_url: str = ""
+    source_url: str = ""
+    source_confidence: SourceConfidence = "medium"
 
     def __post_init__(self) -> None:
         _require_text(self.contact_id, "ContactCandidate.contact_id")
@@ -146,6 +153,26 @@ class ContactCandidate:
             raise TieredModelValidationError(
                 "role_category must be owner, executive, operator, marketing, or unknown"
             )
+        if self.contact_kind not in {
+            "person",
+            "company_email",
+            "company_phone",
+            "company_contact_page",
+        }:
+            raise TieredModelValidationError(
+                "contact_kind must be person, company_email, company_phone, or company_contact_page"
+            )
+        if self.source_confidence not in {"low", "medium", "high"}:
+            raise TieredModelValidationError("source_confidence must be low, medium, or high")
+        if self.contact_kind == "company_email" and not self.email:
+            raise TieredModelValidationError("company_email contact requires email")
+        if self.contact_kind == "company_phone" and not self.phone:
+            raise TieredModelValidationError("company_phone contact requires phone")
+        if self.contact_kind == "company_contact_page" and not (self.contact_url or self.url):
+            raise TieredModelValidationError(
+                "company_contact_page contact requires contact_url or url"
+            )
+        object.__setattr__(self, "label", self.label.strip() or self.name)
         object.__setattr__(
             self, "evidence_ids", _required_text_tuple(self.evidence_ids, "evidence_ids")
         )
@@ -282,6 +309,7 @@ class FinalEnrichmentRecord:
     evidence_ids: tuple[str, ...] = ()
     provider: str = "mock"
     warnings: tuple[str, ...] = ()
+    contact_snapshot: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.enrichment_id, "FinalEnrichmentRecord.enrichment_id")
@@ -290,6 +318,8 @@ class FinalEnrichmentRecord:
             self, "evidence_ids", _required_text_tuple(self.evidence_ids, "evidence_ids")
         )
         object.__setattr__(self, "warnings", _text_tuple(self.warnings))
+        if self.contact_snapshot is not None:
+            object.__setattr__(self, "contact_snapshot", dict(self.contact_snapshot))
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -398,6 +428,16 @@ def tiered_research_schema() -> dict[str, Any]:
                 "properties": {
                     "contact_id": {"type": "string"},
                     "company_id": {"type": "string"},
+                    "contact_kind": {
+                        "type": "string",
+                        "enum": [
+                            "person",
+                            "company_email",
+                            "company_phone",
+                            "company_contact_page",
+                        ],
+                    },
+                    "label": {"type": "string"},
                     "name": {"type": "string"},
                     "title": {"type": "string"},
                     "role_category": {
@@ -407,6 +447,10 @@ def tiered_research_schema() -> dict[str, Any]:
                     "profile_urls": {"type": "array", "items": {"type": "string"}},
                     "email": {"type": ["string", "null"]},
                     "phone": {"type": ["string", "null"]},
+                    "url": {"type": "string"},
+                    "contact_url": {"type": "string"},
+                    "source_url": {"type": "string"},
+                    "source_confidence": {"type": "string", "enum": ["low", "medium", "high"]},
                     "contact_confidence": {"type": "number", "minimum": 0, "maximum": 1},
                     "evidence_ids": {"type": "array", "items": {"type": "string"}},
                     "notes": {"type": "string"},
@@ -470,8 +514,7 @@ def validate_tiered_research_run(run: TieredResearchRun) -> TieredResearchRun:
     for personalization in run.personalizations:
         if personalization.contact_id not in contact_ids:
             raise TieredModelValidationError(
-                "personalization references unknown contact_id "
-                f"{personalization.contact_id!r}"
+                f"personalization references unknown contact_id {personalization.contact_id!r}"
             )
         if personalization.contact_id in seen_personalizations:
             raise TieredModelValidationError(

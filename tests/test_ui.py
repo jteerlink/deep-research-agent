@@ -148,7 +148,7 @@ def test_build_tiered_preview_is_offline_and_query_shaped() -> None:
         "dental companies in DFW area",
         "best dental DFW area",
     ]
-    assert "Example Company owner" in preview["contact_discovery_query_templates"]
+    assert "site:example.com contact" in preview["contact_discovery_query_templates"]
     assert preview["warnings"]
 
 
@@ -189,10 +189,10 @@ def test_flatten_tiered_prospect_rows_uses_company_level_identity(tmp_path) -> N
     assert rows[1]["selected"] is False
     assert rows[0]["row_type"] == "company"
     assert rows[0]["company_name"] == "Acme Dental"
-    assert rows[0]["contact_count"] == 1
-    assert rows[0]["contact_ids"] == [checkpoint.run.contacts[0].contact_id]
-    assert rows[0]["contact_name"] == "Review Contact at Acme Dental"
-    assert "review placeholder" in rows[0]["personalization_summary"]
+    assert rows[0]["contact_count"] == 0
+    assert rows[0]["contact_ids"] == []
+    assert rows[0]["contact_name"] == ""
+    assert rows[0]["personalization_summary"] == ""
 
 
 def test_tiered_review_state_distinguishes_ready_and_empty_review(tmp_path) -> None:
@@ -210,11 +210,13 @@ def test_tiered_review_state_distinguishes_ready_and_empty_review(tmp_path) -> N
         "ready_prospect_count": 2,
         "ready_company_count": 2,
         "company_prospect_count": 2,
-        "ready_contact_count": 2,
-        "contact_candidate_count": 2,
+        "ready_contact_count": 0,
+        "contact_candidate_count": 0,
+        "contact_point_count": 0,
         "qualified_company_count": 2,
-        "companies_with_contacts_count": 2,
-        "needs_contact_count": 0,
+        "companies_with_contacts_count": 0,
+        "companies_with_contact_points_count": 0,
+        "needs_contact_count": 2,
         "rejected_candidate_count": 0,
         "enrichment_count": 0,
         "review_ready": True,
@@ -228,8 +230,10 @@ def test_tiered_review_state_distinguishes_ready_and_empty_review(tmp_path) -> N
         "company_prospect_count": 0,
         "ready_contact_count": 0,
         "contact_candidate_count": 0,
+        "contact_point_count": 0,
         "qualified_company_count": 0,
         "companies_with_contacts_count": 0,
+        "companies_with_contact_points_count": 0,
         "needs_contact_count": 0,
         "rejected_candidate_count": 0,
         "enrichment_count": 0,
@@ -242,15 +246,24 @@ def test_tiered_review_state_counts_ready_needs_contact_and_rejected() -> None:
     payload = {
         "status": "review_required",
         "companies": [
-            {"company_id": "company_ready", "name": "Ready Dental", "website": "https://ready.example"},
+            {
+                "company_id": "company_ready",
+                "name": "Ready Dental",
+                "website": "https://ready.example",
+            },
             {"company_id": "company_needs", "name": "Needs Contact Dental"},
         ],
         "contacts": [
             {
                 "company_id": "company_ready",
                 "contact_id": "contact_ready",
-                "name": "Jane Smith",
-                "title": "Owner",
+                "name": "Company email",
+                "label": "Company email",
+                "contact_kind": "company_email",
+                "email": "hello@ready.example",
+                "url": "mailto:hello@ready.example",
+                "contact_url": "mailto:hello@ready.example",
+                "source_url": "https://ready.example/contact",
                 "contact_confidence": 0.86,
             },
             {
@@ -268,7 +281,8 @@ def test_tiered_review_state_counts_ready_needs_contact_and_rejected() -> None:
                 "company_id": "company_ready",
                 "contact_id": "contact_ready",
                 "company_name": "Ready Dental",
-                "contact_name": "Jane Smith",
+                "contact_label": "Company email",
+                "contact_kind": "company_email",
             },
             {
                 "tier": "company",
@@ -305,9 +319,14 @@ def test_tiered_review_state_counts_ready_needs_contact_and_rejected() -> None:
             "website": "https://ready.example",
             "fit_score": "",
             "contact_count": 1,
-            "contact_names": "Jane Smith, Owner",
-            "contact_name": "Jane Smith",
-            "contact_title": "Owner",
+            "contact_channels": "Email: hello@ready.example",
+            "contact_names": "Email: hello@ready.example",
+            "phone": "",
+            "email": "hello@ready.example",
+            "contact_url": "mailto:hello@ready.example",
+            "contact_kind": "company_email",
+            "contact_name": "Company email",
+            "contact_title": "",
             "contact_confidence": 0.86,
             "personalization_summary": "",
         },
@@ -323,7 +342,12 @@ def test_tiered_review_state_counts_ready_needs_contact_and_rejected() -> None:
             "website": "",
             "fit_score": "",
             "contact_count": 0,
+            "contact_channels": "",
             "contact_names": "",
+            "phone": "",
+            "email": "",
+            "contact_url": "",
+            "contact_kind": "",
             "contact_name": "",
             "contact_title": "",
             "contact_confidence": "",
@@ -335,8 +359,10 @@ def test_tiered_review_state_counts_ready_needs_contact_and_rejected() -> None:
         "company_prospect_count": 2,
         "ready_contact_count": 1,
         "contact_candidate_count": 2,
+        "contact_point_count": 2,
         "qualified_company_count": 2,
         "companies_with_contacts_count": 1,
+        "companies_with_contact_points_count": 1,
         "needs_contact_count": 1,
         "rejected_candidate_count": 1,
     }
@@ -348,8 +374,10 @@ def test_tiered_review_state_counts_ready_needs_contact_and_rejected() -> None:
         "company_prospect_count": 2,
         "ready_contact_count": 1,
         "contact_candidate_count": 2,
+        "contact_point_count": 2,
         "qualified_company_count": 2,
         "companies_with_contacts_count": 1,
+        "companies_with_contact_points_count": 1,
         "needs_contact_count": 1,
         "rejected_candidate_count": 1,
         "enrichment_count": 0,
@@ -370,7 +398,7 @@ def test_selected_prospect_rows_build_approval_for_checked_pairs(tmp_path) -> No
     approval = selection_from_prospect_rows(rows, reviewer="tester", approved_at="now")
 
     assert approval.approved_company_ids == (rows[0]["company_id"],)
-    assert approval.approved_contact_ids == (rows[0]["contact_id"],)
+    assert approval.approved_contact_ids == ()
     assert approval.reviewer == "tester"
     assert approval.approved_at == "now"
 
@@ -400,20 +428,22 @@ def test_missing_exa_key_blocks_ui_enrichment_without_checkpoint_write(tmp_path)
 
     assert approval is None
     assert error == "EXA_API_KEY is required to run final Exa enrichment for selected prospects."
-    assert resume_tiered_research(
-        checkpoint.thread_id,
-        checkpoint_dir=tmp_path / "checkpoints",
-        artifact_dir=tmp_path / "artifacts",
-    ).final_enrichment == ()
+    assert (
+        resume_tiered_research(
+            checkpoint.thread_id,
+            checkpoint_dir=tmp_path / "checkpoints",
+            artifact_dir=tmp_path / "artifacts",
+        ).final_enrichment
+        == ()
+    )
 
 
 def test_enriched_rows_join_display_labels_and_csv_bytes(tmp_path) -> None:
     checkpoint = _tiered_checkpoint(tmp_path)
     company_id = checkpoint.run.companies[0].company_id
-    contact_id = checkpoint.run.contacts[0].contact_id
     approval = ApprovedProspectSelection(
         approved_company_ids=(company_id,),
-        approved_contact_ids=(contact_id,),
+        approved_contact_ids=(),
     )
     enriched = resume_tiered_research(
         checkpoint.thread_id,
@@ -421,7 +451,7 @@ def test_enriched_rows_join_display_labels_and_csv_bytes(tmp_path) -> None:
         artifact_dir=tmp_path / "artifacts",
         approval_selection=approval,
         enable_final_enrichment=True,
-        mock_final_enrichment=(f"{company_id}|{contact_id}|Approved enrichment only|exa",),
+        mock_final_enrichment=(f"{company_id}||Approved enrichment only|exa",),
     )
 
     rows = flatten_enriched_prospect_rows(enriched)
@@ -434,9 +464,15 @@ def test_enriched_rows_join_display_labels_and_csv_bytes(tmp_path) -> None:
             "company_id": company_id,
             "company_name": "Acme Dental",
             "website": "https://acme.example",
-            "contact_id": contact_id,
-            "contact_name": "Review Contact at Acme Dental",
-            "contact_title": "owner",
+            "contact_id": "",
+            "contact_kind": "",
+            "contact_label": "",
+            "email": "",
+            "phone": "",
+            "contact_url": "",
+            "source_url": "",
+            "contact_name": "",
+            "contact_title": "",
             "summary": "Approved enrichment only",
             "evidence_ids": "ev_final_001",
             "warnings": "",
@@ -444,6 +480,55 @@ def test_enriched_rows_join_display_labels_and_csv_bytes(tmp_path) -> None:
     ]
     assert b"final_001" in csv_bytes
     assert b"Approved enrichment only" in csv_bytes
+
+
+def test_enriched_rows_prefer_persisted_contact_snapshot() -> None:
+    payload = {
+        "companies": [
+            {
+                "company_id": "company_001",
+                "name": "Acme Plumbing",
+                "website": "https://acme.example",
+            }
+        ],
+        "contacts": [
+            {
+                "contact_id": "contact_001",
+                "company_id": "company_001",
+                "contact_kind": "company_email",
+                "label": "Stale email",
+                "email": "stale@acme.example",
+                "source_url": "https://acme.example/old-contact",
+            }
+        ],
+        "final_enrichment": [
+            {
+                "enrichment_id": "final_001",
+                "provider": "exa",
+                "company_id": "company_001",
+                "contact_id": "contact_001",
+                "summary": "Approved enrichment.",
+                "evidence_ids": ["ev_final"],
+                "warnings": [],
+                "contact_snapshot": {
+                    "contact_kind": "company_email",
+                    "label": "Company email",
+                    "name": "Company email",
+                    "email": "dispatch@acme.example",
+                    "phone": "",
+                    "contact_url": "mailto:dispatch@acme.example",
+                    "source_url": "https://acme.example/contact",
+                },
+            }
+        ],
+    }
+
+    rows = flatten_enriched_prospect_rows(payload)
+
+    assert rows[0]["contact_label"] == "Company email"
+    assert rows[0]["email"] == "dispatch@acme.example"
+    assert rows[0]["contact_url"] == "mailto:dispatch@acme.example"
+    assert rows[0]["source_url"] == "https://acme.example/contact"
 
 
 def test_preview_geography_scope_expands_known_regions() -> None:

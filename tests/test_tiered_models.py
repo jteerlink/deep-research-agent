@@ -114,6 +114,15 @@ def test_tiered_research_schema_documents_required_contract_sections() -> None:
         "marketing",
         "unknown",
     ]
+    assert schema["definitions"]["contact"]["properties"]["contact_kind"]["enum"] == [
+        "person",
+        "company_email",
+        "company_phone",
+        "company_contact_page",
+    ]
+    assert {"label", "url", "contact_url", "source_url", "source_confidence"}.issubset(
+        schema["definitions"]["contact"]["properties"]
+    )
 
 
 def test_complete_tiered_run_serializes_company_contact_and_personalization_records() -> None:
@@ -161,7 +170,7 @@ def test_complete_tiered_run_serializes_company_contact_and_personalization_reco
 def test_company_contract_rejects_invalid_scores_confidence_and_uncited_records(
     kwargs: dict[str, object], match: str
 ) -> None:
-    data = {
+    data: dict[str, object] = {
         "company_id": "company_001",
         "name": "Example Dental Group",
         "fit_score": 0.5,
@@ -171,6 +180,33 @@ def test_company_contract_rejects_invalid_scores_confidence_and_uncited_records(
 
     with pytest.raises(TieredModelValidationError, match=match):
         CompanyProspect(**data)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"contact_kind": "company_email", "email": None}, "requires email"),
+        ({"contact_kind": "company_phone", "phone": None}, "requires phone"),
+        (
+            {"contact_kind": "company_contact_page", "contact_url": "", "url": ""},
+            "requires contact_url or url",
+        ),
+    ],
+)
+def test_company_contact_point_contract_requires_matching_channel(
+    kwargs: dict[str, object],
+    match: str,
+) -> None:
+    data: dict[str, object] = {
+        "contact_id": "contact_001",
+        "company_id": "company_001",
+        "name": "Company contact point",
+        "evidence_ids": ("ev_contact_001",),
+    }
+    data.update(kwargs)
+
+    with pytest.raises(TieredModelValidationError, match=match):
+        ContactCandidate(**data)  # type: ignore[arg-type]
 
 
 def test_cross_record_validation_rejects_unknown_relationships_and_duplicates() -> None:

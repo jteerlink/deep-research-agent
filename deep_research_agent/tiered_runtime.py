@@ -8,15 +8,17 @@ and demos inject mock records through CLI flags or JSON files.
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+from .company_contact_extraction import CompanyContactSource, extract_company_contact_points
 from .geography import normalize_geography
 from .tiered_artifacts import build_tiered_artifact_payload, write_tiered_artifacts
 from .tiered_models import (
@@ -38,9 +40,7 @@ from .tiered_models import (
 from .tiered_qualification import (
     QualificationAuditRecord,
     QualifiedCompanyBatch,
-    QualifiedContactBatch,
     qualify_company_hits,
-    qualify_contact_hits,
 )
 from .tiered_search import (
     CompanySearchTarget,
@@ -64,6 +64,7 @@ FinalEnrichmentFactory = Callable[
     [TieredResearchRun, ApprovedProspectSelection],
     Sequence[FinalEnrichmentRecord],
 ]
+CompanyContactPageFetcher = Callable[[str], Any]
 
 
 @dataclass(frozen=True)
@@ -158,8 +159,18 @@ def run_tiered_research(
 
     active_thread_id = _validate_thread_id(thread_id or f"tiered-{uuid4().hex[:12]}")
     companies = _companies_from_mock_results(mock_results, directive)
-    contacts = _contacts_for_companies(companies, directive)
-    personalizations = _personalizations_for_contacts(contacts)
+    contacts: list[ContactCandidate] = []
+    personalizations: list[ContactPersonalization] = []
+    qualification_audit = [
+        record
+        for company in companies
+        for record in _contact_point_audit_payloads(company, contacts=(), hits=())
+    ]
+    qualification_counts = _qualification_counts(
+        companies=companies,
+        contacts=contacts,
+        qualification_audit=qualification_audit,
+    )
     warnings = (
         "No mock company results were provided; no company records were generated."
         if not mock_results
@@ -180,6 +191,8 @@ def run_tiered_research(
         run=run,
         events=(event,),
         warnings=run.warnings,
+        qualification_audit=tuple(qualification_audit),
+        qualification_counts=qualification_counts,
     )
     return _persist_checkpoint(
         checkpoint,
@@ -198,6 +211,7 @@ async def run_tiered_research_with_search(
     max_results: int = 5,
     max_contact_queries_per_company: int = 4,
     provider_policy: ProviderPolicy | None = None,
+    company_contact_page_fetcher: CompanyContactPageFetcher | None = None,
 ) -> TieredCheckpoint:
     """Create a review-gated tiered checkpoint from live injected search results."""
 
@@ -226,7 +240,8 @@ async def run_tiered_research_with_search(
     contact_audit: list[dict[str, Any]] = []
     companies: list[CompanyProspect] = []
     contacts: list[ContactCandidate] = []
-    contact_failures = 0
+    contact_search_failures = 0
+    contact_fetch_failures: list[dict[str, Any]] = []
     for candidate in company_qualification.accepted:
         company = candidate.to_company_prospect(directive)
         companies.append(company)
@@ -241,20 +256,27 @@ async def run_tiered_research_with_search(
             search=search,
             provider_policy=policy,
         )
-        contact_failures += len(contact_batch.failures)
-        contact_qualification = qualify_contact_hits(
-            contact_batch.hits,
-            company,
-            directive,
-            max_contacts=LIVE_CONTACTS_PER_COMPANY,
+        contact_search_failures += len(contact_batch.failures)
+        sources = _company_contact_sources(company, contact_batch.hits)
+        if company_contact_page_fetcher is not None:
+            fetched_sources, fetch_failure_payloads = await _fetched_company_contact_sources(
+                company,
+                sources,
+                company_contact_page_fetcher,
+            )
+            sources = (*sources, *fetched_sources)
+            contact_fetch_failures.extend(fetch_failure_payloads)
+            contact_audit.extend(fetch_failure_payloads)
+        company_contacts = list(
+            extract_company_contact_points(
+                company,
+                sources,
+                max_contact_points=LIVE_CONTACTS_PER_COMPANY,
+            )
         )
-        company_contacts = [
-            candidate.to_contact_candidate()
-            for candidate in contact_qualification.accepted
-        ]
         contacts.extend(company_contacts)
         contact_audit.extend(
-            _contact_audit_payloads(contact_qualification, company)
+            _contact_point_audit_payloads(company, company_contacts, contact_batch.hits)
         )
 
     qualification_audit = [*company_audit, *contact_audit]
@@ -265,7 +287,8 @@ async def run_tiered_research_with_search(
     warnings = _live_search_warnings(
         company_count=len(companies),
         company_failures=len(company_batch.failures),
-        contact_failures=contact_failures,
+        contact_search_failures=contact_search_failures,
+        contact_fetch_failures=len(contact_fetch_failures),
         needs_contact_count=_count_audit_status(qualification_audit, "needs_contact"),
         rejected_candidate_count=_count_audit_status(qualification_audit, "rejected"),
     )
@@ -301,8 +324,9 @@ async def run_tiered_research_with_search(
             ),
             _event(
                 "contact_qualification_complete",
-                f"{len(contacts)} qualified contact-level prospect row(s) promoted for review",
+                f"{len(contacts)} company contact point(s) promoted for review",
                 accepted_contact_count=len(contacts),
+                accepted_contact_point_count=len(contacts),
                 rejected_contact_count=_count_audit_status(contact_audit, "rejected"),
                 needs_contact_count=_count_audit_status(contact_audit, "needs_contact"),
             ),
@@ -367,6 +391,7 @@ def resume_tiered_research(
                     approval=approval,
                     run=checkpoint.run,
                 )
+            proposed = _hydrate_final_enrichment_snapshots(proposed, checkpoint.run)
             _validate_final_enrichment(proposed, approval, checkpoint.run)
             final_enrichment = list(proposed)
             status = "final_enrichment_complete"
@@ -430,9 +455,7 @@ def inspect_tiered_research(
         final_enrichment=final_enrichment,
         events=tuple(dict(item) for item in payload.get("events") or ()),
         warnings=tuple(str(item) for item in payload.get("warnings") or ()),
-        qualification_audit=tuple(
-            dict(item) for item in payload.get("qualification_audit") or ()
-        ),
+        qualification_audit=tuple(dict(item) for item in payload.get("qualification_audit") or ()),
         qualification_counts=_qualification_counts_from_payload(
             payload.get("qualification_counts") or payload.get("metadata") or {}
         ),
@@ -554,10 +577,144 @@ def _company_candidate_result_cap(directive: SearchDirective, max_results: int) 
     return min(MAX_LIVE_COMPANY_CANDIDATES, requested_pool)
 
 
+def _company_contact_sources(
+    company: CompanyProspect,
+    hits: Sequence[Any],
+) -> tuple[CompanyContactSource, ...]:
+    sources: list[CompanyContactSource] = []
+    if company.website:
+        sources.append(
+            CompanyContactSource(
+                url=company.website,
+                title=f"{company.name} official website",
+                content="",
+                evidence_id=f"ev_contact_{_slug(company.company_id)}_website",
+                source_confidence=company.source_confidence,
+            )
+        )
+    for index, hit in enumerate(hits, start=1):
+        sources.append(
+            CompanyContactSource(
+                url=str(getattr(hit, "url", "")),
+                title=str(getattr(hit, "title", "")),
+                content=str(getattr(hit, "content", "")),
+                evidence_id=f"ev_contact_{_slug(company.company_id)}_search_{index:03d}",
+                source_confidence=company.source_confidence,
+            )
+        )
+    return tuple(sources)
+
+
+async def _fetched_company_contact_sources(
+    company: CompanyProspect,
+    sources: Sequence[CompanyContactSource],
+    fetcher: CompanyContactPageFetcher,
+) -> tuple[tuple[CompanyContactSource, ...], tuple[dict[str, Any], ...]]:
+    fetched: list[CompanyContactSource] = []
+    failures: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    company_host = _domain_from_url(company.website)
+    for source in sources[: LIVE_CONTACTS_PER_COMPANY + 1]:
+        if not source.url or source.url in seen:
+            continue
+        source_host = _domain_from_url(source.url)
+        if not company_host or not source_host or not _same_domain(source_host, company_host):
+            continue
+        seen.add(source.url)
+        try:
+            result = fetcher(source.url)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            failures.append(
+                {
+                    "tier": "contact_discovery",
+                    "status": "fetch_failed",
+                    "source_title": source.title,
+                    "source_url": source.url,
+                    "reasons": ["contact_page_fetch_failed"],
+                    "normalized_name": company.name,
+                    "source_confidence": source.source_confidence,
+                    "evidence_id": source.evidence_id,
+                    "company_id": company.company_id,
+                    "company_name": company.name,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc)[:160],
+                }
+            )
+            continue
+        if not result:
+            continue
+        fetched.append(
+            CompanyContactSource(
+                url=source.url,
+                title=source.title,
+                content=str(result),
+                evidence_id=f"{source.evidence_id}_fetched",
+                source_confidence=source.source_confidence,
+            )
+        )
+    return tuple(fetched), tuple(failures)
+
+
+def _contact_point_audit_payloads(
+    company: CompanyProspect,
+    contacts: Sequence[ContactCandidate],
+    hits: Sequence[Any],
+) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for contact in contacts:
+        payloads.append(
+            {
+                "tier": "contact_discovery",
+                "status": "accepted",
+                "source_title": contact.label,
+                "source_url": contact.source_url or contact.url,
+                "reasons": ["official_company_contact_point", contact.contact_kind],
+                "normalized_name": contact.label,
+                "source_confidence": contact.source_confidence,
+                "evidence_id": contact.evidence_ids[0] if contact.evidence_ids else "",
+                "company_id": company.company_id,
+                "company_name": company.name,
+                "contact_id": contact.contact_id,
+                "contact_kind": contact.contact_kind,
+                "contact_label": contact.label,
+            }
+        )
+    if contacts:
+        return payloads
+    for hit in hits:
+        payloads.append(
+            {
+                "tier": "contact_discovery",
+                "status": "rejected",
+                "source_title": str(getattr(hit, "title", "")),
+                "source_url": str(getattr(hit, "url", "")),
+                "reasons": ["no_actionable_company_contact_info"],
+                "normalized_name": company.name,
+                "source_confidence": "low",
+                "company_id": company.company_id,
+                "company_name": company.name,
+            }
+        )
+    payloads.append(
+        {
+            "tier": "contact_discovery",
+            "status": "needs_contact",
+            "source_title": f"No verified contact info for {company.name}",
+            "source_url": company.website,
+            "reasons": ["qualified_company_needs_contact"],
+            "normalized_name": company.name,
+            "source_confidence": "medium",
+            "company_id": company.company_id,
+            "company_name": company.name,
+        }
+    )
+    return payloads
+
+
 def _company_audit_payloads(batch: QualifiedCompanyBatch) -> list[dict[str, Any]]:
-    accepted_by_evidence_id = {
-        candidate.evidence_id: candidate for candidate in batch.accepted
-    }
+    accepted_by_evidence_id = {candidate.evidence_id: candidate for candidate in batch.accepted}
     payloads: list[dict[str, Any]] = []
     for record in batch.audit_records:
         payload = _audit_payload(record)
@@ -571,37 +728,6 @@ def _company_audit_payloads(batch: QualifiedCompanyBatch) -> list[dict[str, Any]
             )
         elif record.normalized_name:
             payload["company_name"] = record.normalized_name
-        payloads.append(payload)
-    return payloads
-
-
-def _contact_audit_payloads(
-    batch: QualifiedContactBatch,
-    company: CompanyProspect,
-) -> list[dict[str, Any]]:
-    accepted_by_evidence_id = {
-        candidate.evidence_id: candidate for candidate in batch.accepted
-    }
-    payloads: list[dict[str, Any]] = []
-    for record in batch.audit_records:
-        payload = _audit_payload(record)
-        payload.update(
-            {
-                "company_id": company.company_id,
-                "company_name": company.name,
-            }
-        )
-        candidate = accepted_by_evidence_id.get(record.evidence_id)
-        if candidate is not None:
-            payload.update(
-                {
-                    "contact_id": candidate.contact_id,
-                    "contact_name": candidate.name,
-                    "contact_title": candidate.title,
-                }
-            )
-        elif record.normalized_name and record.normalized_name != company.name:
-            payload["contact_name"] = record.normalized_name
         payloads.append(payload)
     return payloads
 
@@ -625,8 +751,10 @@ def _qualification_counts(
         "company_prospect_count": len(companies),
         "ready_contact_count": len(contacts),
         "contact_candidate_count": len(contacts),
+        "contact_point_count": len(contacts),
         "qualified_company_count": len(companies),
         "companies_with_contacts_count": len(companies_with_contacts),
+        "companies_with_contact_points_count": len(companies_with_contacts),
         "needs_contact_count": _count_audit_status(qualification_audit, "needs_contact"),
         "rejected_candidate_count": _count_audit_status(qualification_audit, "rejected"),
     }
@@ -644,8 +772,10 @@ def _qualification_counts_from_payload(payload: Any) -> dict[str, int]:
         "company_prospect_count",
         "ready_contact_count",
         "contact_candidate_count",
+        "contact_point_count",
         "qualified_company_count",
         "companies_with_contacts_count",
+        "companies_with_contact_points_count",
         "needs_contact_count",
         "rejected_candidate_count",
     ):
@@ -671,29 +801,6 @@ def _count_audit_status(
     )
 
 
-def _contacts_for_companies(
-    companies: list[CompanyProspect],
-    directive: SearchDirective,
-) -> list[ContactCandidate]:
-    role = directive.preferred_contact_roles[0] if directive.preferred_contact_roles else "owner"
-    contacts: list[ContactCandidate] = []
-    for company in companies:
-        contact_id = f"contact_{_slug(company.company_id)}_001"
-        contacts.append(
-            ContactCandidate(
-                contact_id=contact_id,
-                company_id=company.company_id,
-                name=f"Review Contact at {company.name}",
-                title=role,
-                role_category=_role_category(role),
-                contact_confidence=0.55,
-                evidence_ids=(f"ev_{contact_id}_001",),
-                notes="Generated from mock company result; requires human review.",
-            )
-        )
-    return contacts
-
-
 def _personalizations_for_contacts(
     contacts: list[ContactCandidate],
     *,
@@ -701,6 +808,8 @@ def _personalizations_for_contacts(
 ) -> list[ContactPersonalization]:
     personalizations: list[ContactPersonalization] = []
     for contact in contacts:
+        if contact.contact_kind != "person":
+            continue
         signal_text = (
             contact.notes
             if contact.notes and source_label != "mock discovery"
@@ -733,7 +842,8 @@ def _live_search_warnings(
     *,
     company_count: int,
     company_failures: int,
-    contact_failures: int,
+    contact_search_failures: int,
+    contact_fetch_failures: int,
     needs_contact_count: int = 0,
     rejected_candidate_count: int = 0,
 ) -> tuple[str, ...]:
@@ -746,11 +856,15 @@ def _live_search_warnings(
         )
     if company_failures:
         warnings.append(f"Company discovery had {company_failures} failed search query/queries.")
-    if contact_failures:
-        warnings.append(f"Contact discovery had {contact_failures} failed search query/queries.")
+    if contact_search_failures:
+        warnings.append(
+            f"Contact discovery had {contact_search_failures} failed search query/queries."
+        )
+    if contact_fetch_failures:
+        warnings.append(f"Contact page fetching had {contact_fetch_failures} failed page(s).")
     if needs_contact_count:
         warnings.append(
-            f"{needs_contact_count} qualified company prospect(s) still need verified contacts."
+            f"{needs_contact_count} qualified company prospect(s) still need verified contact info."
         )
     if rejected_candidate_count:
         warnings.append(
@@ -803,6 +917,41 @@ def _final_enrichment_records(
             )
         )
     return tuple(records)
+
+
+def _hydrate_final_enrichment_snapshots(
+    records: Sequence[FinalEnrichmentRecord],
+    run: TieredResearchRun,
+) -> tuple[FinalEnrichmentRecord, ...]:
+    contacts_by_id = {contact.contact_id: contact for contact in run.contacts}
+    hydrated: list[FinalEnrichmentRecord] = []
+    for record in records:
+        if record.contact_snapshot is not None or not record.contact_id:
+            hydrated.append(record)
+            continue
+        contact = contacts_by_id.get(record.contact_id)
+        if contact is None:
+            hydrated.append(record)
+            continue
+        hydrated.append(
+            replace(
+                record,
+                contact_snapshot={
+                    "contact_id": contact.contact_id,
+                    "company_id": contact.company_id,
+                    "contact_kind": contact.contact_kind,
+                    "label": contact.label,
+                    "name": contact.name,
+                    "title": contact.title,
+                    "email": contact.email or "",
+                    "phone": contact.phone or "",
+                    "url": contact.url,
+                    "contact_url": contact.contact_url,
+                    "source_url": contact.source_url,
+                },
+            )
+        )
+    return tuple(hydrated)
 
 
 def _validate_approval(
@@ -865,8 +1014,7 @@ def _approved_contacts_by_company(
         if contact.contact_id in approved_contacts:
             contacts_by_company.setdefault(contact.company_id, []).append(contact.contact_id)
     return {
-        company_id: tuple(contact_ids)
-        for company_id, contact_ids in contacts_by_company.items()
+        company_id: tuple(contact_ids) for company_id, contact_ids in contacts_by_company.items()
     }
 
 
@@ -880,6 +1028,12 @@ def _domain_from_url(url: str) -> str:
     )
 
 
+def _same_domain(host: str, official_host: str) -> bool:
+    host = host.casefold().removeprefix("www.")
+    official_host = official_host.casefold().removeprefix("www.")
+    return host == official_host or host.endswith(f".{official_host}")
+
+
 def _run_from_payload(payload: dict[str, Any]) -> TieredResearchRun:
     return TieredResearchRun(
         run_id=str(payload["run_id"]),
@@ -887,8 +1041,7 @@ def _run_from_payload(payload: dict[str, Any]) -> TieredResearchRun:
         companies=tuple(_company_from_payload(item) for item in payload.get("companies") or ()),
         contacts=tuple(_contact_from_payload(item) for item in payload.get("contacts") or ()),
         personalizations=tuple(
-            _personalization_from_payload(item)
-            for item in payload.get("personalizations") or ()
+            _personalization_from_payload(item) for item in payload.get("personalizations") or ()
         ),
         browser_captures=(),
         warnings=tuple(str(item) for item in payload.get("warnings") or ()),
@@ -924,6 +1077,22 @@ def _contact_from_payload(payload: dict[str, Any]) -> ContactCandidate:
         phone=payload.get("phone"),
         contact_confidence=float(payload.get("contact_confidence") or 0.0),
         notes=str(payload.get("notes") or ""),
+        contact_kind=cast(Any, _required_contact_kind_from_payload(payload)),
+        label=str(payload.get("label") or payload.get("name") or ""),
+        url=str(payload.get("url") or ""),
+        contact_url=str(payload.get("contact_url") or payload.get("url") or ""),
+        source_url=str(payload.get("source_url") or ""),
+        source_confidence=cast(SourceConfidence, str(payload.get("source_confidence") or "medium")),
+    )
+
+
+def _required_contact_kind_from_payload(payload: dict[str, Any]) -> str:
+    raw = payload.get("contact_kind")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    raise ValueError(
+        "legacy contact payload missing contact_kind; rerun tiered research or migrate "
+        "the checkpoint before resuming company-contact artifacts"
     )
 
 
@@ -964,6 +1133,7 @@ def _final_record_from_payload(payload: dict[str, Any]) -> FinalEnrichmentRecord
         provider=str(payload.get("provider") or "mock"),
         evidence_ids=tuple(payload.get("evidence_ids") or ()),
         warnings=tuple(payload.get("warnings") or ()),
+        contact_snapshot=payload.get("contact_snapshot"),
     )
 
 
@@ -1003,9 +1173,7 @@ def _slug(value: str) -> str:
 def _validate_thread_id(thread_id: str) -> str:
     candidate = str(thread_id).strip()
     if not candidate or not _THREAD_ID_PATTERN.fullmatch(candidate):
-        raise ValueError(
-            "thread_id must contain only letters, numbers, underscore, dash, or dot"
-        )
+        raise ValueError("thread_id must contain only letters, numbers, underscore, dash, or dot")
     if candidate in {".", ".."}:
         raise ValueError("thread_id cannot be . or ..")
     return candidate

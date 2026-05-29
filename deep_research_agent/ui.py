@@ -294,16 +294,17 @@ def flatten_tiered_prospect_rows(
             if str(contact.get("contact_id") or "")
         ]
         primary_contact = company_contacts[0] if company_contacts else {}
-        contact_summaries = [
-            ", ".join(
-                part
-                for part in (
-                    str(contact.get("name") or ""),
-                    str(contact.get("title") or ""),
-                )
-                if part
-            )
+        contact_summaries = [_contact_info_summary(contact) for contact in company_contacts]
+        phones = [
+            str(contact.get("phone") or "") for contact in company_contacts if contact.get("phone")
+        ]
+        emails = [
+            str(contact.get("email") or "") for contact in company_contacts if contact.get("email")
+        ]
+        contact_urls = [
+            str(contact.get("contact_url") or contact.get("url") or "")
             for contact in company_contacts
+            if contact.get("contact_url") or contact.get("url")
         ]
         personalization_summary = "; ".join(
             personalizations.get(contact_id, "")
@@ -325,14 +326,40 @@ def flatten_tiered_prospect_rows(
                 "website": str(company.get("website") or ""),
                 "fit_score": company.get("fit_score", ""),
                 "contact_count": len(company_contacts),
+                "contact_channels": "; ".join(contact_summaries),
                 "contact_names": "; ".join(contact_summaries),
-                "contact_name": str(primary_contact.get("name") or ""),
-                "contact_title": str(primary_contact.get("title") or ""),
+                "phone": "; ".join(phones),
+                "email": "; ".join(emails),
+                "contact_url": "; ".join(contact_urls),
+                "contact_kind": str(primary_contact.get("contact_kind") or ""),
+                "contact_name": str(
+                    primary_contact.get("label") or primary_contact.get("name") or ""
+                ),
+                "contact_title": (
+                    str(primary_contact.get("title") or "")
+                    if str(primary_contact.get("contact_kind") or "person") == "person"
+                    else ""
+                ),
                 "contact_confidence": primary_contact.get("contact_confidence", ""),
                 "personalization_summary": personalization_summary,
             }
         )
     return rows
+
+
+def _contact_info_summary(contact: Mapping[str, Any]) -> str:
+    kind = str(contact.get("contact_kind") or "person")
+    if kind == "company_email" and contact.get("email"):
+        return f"Email: {contact.get('email')}"
+    if kind == "company_phone" and contact.get("phone"):
+        return f"Phone: {contact.get('phone')}"
+    if kind == "company_contact_page" and (contact.get("contact_url") or contact.get("url")):
+        return f"Contact page: {contact.get('contact_url') or contact.get('url')}"
+    if kind != "person":
+        return str(contact.get("label") or contact.get("name") or kind)
+    return ", ".join(
+        part for part in (str(contact.get("name") or ""), str(contact.get("title") or "")) if part
+    )
 
 
 def selection_from_prospect_rows(
@@ -428,7 +455,8 @@ def flatten_enriched_prospect_rows(
         company_id = str(record.get("company_id") or "")
         contact_id = str(record.get("contact_id") or "")
         company = companies.get(company_id, {})
-        contact = contacts.get(contact_id, {})
+        snapshot = record.get("contact_snapshot")
+        contact = snapshot if isinstance(snapshot, Mapping) else contacts.get(contact_id, {})
         rows.append(
             {
                 "enrichment_id": str(record.get("enrichment_id") or ""),
@@ -437,8 +465,18 @@ def flatten_enriched_prospect_rows(
                 "company_name": str(company.get("name") or ""),
                 "website": str(company.get("website") or ""),
                 "contact_id": contact_id,
-                "contact_name": str(contact.get("name") or ""),
-                "contact_title": str(contact.get("title") or ""),
+                "contact_kind": str(contact.get("contact_kind") or ""),
+                "contact_label": str(contact.get("label") or contact.get("name") or ""),
+                "email": str(contact.get("email") or ""),
+                "phone": str(contact.get("phone") or ""),
+                "contact_url": str(contact.get("contact_url") or contact.get("url") or ""),
+                "source_url": str(contact.get("source_url") or ""),
+                "contact_name": str(contact.get("label") or contact.get("name") or ""),
+                "contact_title": (
+                    str(contact.get("title") or "")
+                    if str(contact.get("contact_kind") or "person") == "person"
+                    else ""
+                ),
                 "summary": str(record.get("summary") or ""),
                 "evidence_ids": "; ".join(str(item) for item in record.get("evidence_ids") or ()),
                 "warnings": "; ".join(str(item) for item in record.get("warnings") or ()),
@@ -470,6 +508,12 @@ def final_enrichment_csv_bytes(
         "company_name",
         "website",
         "contact_id",
+        "contact_kind",
+        "contact_label",
+        "email",
+        "phone",
+        "contact_url",
+        "source_url",
         "contact_name",
         "contact_title",
         "summary",
@@ -500,8 +544,10 @@ def tiered_review_state(
         "company_prospect_count": qualification["company_prospect_count"],
         "ready_contact_count": qualification["ready_contact_count"],
         "contact_candidate_count": qualification["contact_candidate_count"],
+        "contact_point_count": qualification["contact_point_count"],
         "qualified_company_count": qualification["qualified_company_count"],
         "companies_with_contacts_count": qualification["companies_with_contacts_count"],
+        "companies_with_contact_points_count": qualification["companies_with_contact_points_count"],
         "needs_contact_count": qualification["needs_contact_count"],
         "rejected_candidate_count": qualification["rejected_candidate_count"],
         "enrichment_count": enrichment_count,
@@ -522,9 +568,7 @@ def qualification_summary(
 
     payload = _tiered_payload(checkpoint)
     metadata_value = payload.get("metadata")
-    metadata: Mapping[str, Any] = (
-        metadata_value if isinstance(metadata_value, Mapping) else {}
-    )
+    metadata: Mapping[str, Any] = metadata_value if isinstance(metadata_value, Mapping) else {}
     audit = _qualification_audit(payload)
     companies = [
         company for company in payload.get("companies") or () if isinstance(company, Mapping)
@@ -557,9 +601,7 @@ def qualification_summary(
     companies_with_contacts = accepted_contact_company_ids or contact_company_ids
     defaults = {
         "ready_company_count": (
-            ready_company_count
-            if ready_company_count is not None
-            else len(companies)
+            ready_company_count if ready_company_count is not None else len(companies)
         ),
         "company_prospect_count": len(companies),
         "ready_contact_count": (
@@ -568,8 +610,10 @@ def qualification_summary(
             else (len(accepted_contact_ids) if accepted_contact_ids else len(contacts))
         ),
         "contact_candidate_count": len(contacts),
+        "contact_point_count": len(contacts),
         "qualified_company_count": len(companies),
         "companies_with_contacts_count": len(companies_with_contacts),
+        "companies_with_contact_points_count": len(companies_with_contacts),
         "needs_contact_count": (
             len({item for item in needs_contact_from_audit if item})
             if needs_contact_from_audit
@@ -729,9 +773,7 @@ def _personalization_summaries(payload: Mapping[str, Any]) -> dict[str, str]:
         for signal in item.get("personalization_signals") or ():
             if not isinstance(signal, Mapping):
                 continue
-            signals.append(
-                str(signal.get("message_angle") or signal.get("signal") or "").strip()
-            )
+            signals.append(str(signal.get("message_angle") or signal.get("signal") or "").strip())
         summaries[contact_id] = "; ".join(signal for signal in signals if signal)
     return summaries
 
@@ -1162,10 +1204,10 @@ def render_app() -> None:
         if review_state["review_ready"]:
             st.info(
                 f"{review_state['ready_prospect_count']} company prospect row(s); "
-                f"{review_state['contact_candidate_count']} contact candidate(s); "
+                f"{review_state['contact_point_count']} company contact point(s); "
                 f"{review_state['needs_contact_count']} qualified compan"
                 f"{'y' if review_state['needs_contact_count'] == 1 else 'ies'} "
-                "need contact discovery; "
+                "need contact info; "
                 f"{review_state['rejected_candidate_count']} rejected/noisy candidate(s)."
             )
         elif review_state["empty_review"]:
@@ -1173,7 +1215,7 @@ def render_app() -> None:
                 "No company prospect rows were generated for this tiered run. "
                 f"{review_state['needs_contact_count']} qualified compan"
                 f"{'y' if review_state['needs_contact_count'] == 1 else 'ies'} "
-                "need contact discovery; "
+                "need contact info; "
                 f"{review_state['rejected_candidate_count']} rejected/noisy candidate(s)."
             )
 
@@ -1209,7 +1251,10 @@ def render_app() -> None:
                         "website",
                         "fit_score",
                         "contact_count",
-                        "contact_names",
+                        "contact_channels",
+                        "phone",
+                        "email",
+                        "contact_url",
                         "personalization_summary",
                     ),
                     disabled=[
@@ -1221,7 +1266,12 @@ def render_app() -> None:
                         "website",
                         "fit_score",
                         "contact_count",
+                        "contact_channels",
                         "contact_names",
+                        "phone",
+                        "email",
+                        "contact_url",
+                        "contact_kind",
                         "contact_name",
                         "contact_title",
                         "contact_confidence",
@@ -1230,6 +1280,7 @@ def render_app() -> None:
                     column_config={
                         "selected": st.column_config.CheckboxColumn("Select"),
                         "website": st.column_config.LinkColumn("Website"),
+                        "contact_url": st.column_config.LinkColumn("Contact URL"),
                     },
                 )
                 current_selection = {
@@ -1276,8 +1327,7 @@ def render_app() -> None:
                         st.session_state.last_tiered_state = enriched.to_dict()
                         st.session_state.last_state = None
                         st.success(
-                            "Exa enrichment complete: "
-                            f"{len(enriched.final_enrichment)} record(s)."
+                            f"Exa enrichment complete: {len(enriched.final_enrichment)} record(s)."
                         )
                         st.rerun()
             else:

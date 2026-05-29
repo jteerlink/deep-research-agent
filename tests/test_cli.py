@@ -178,7 +178,8 @@ def test_cli_tiered_run_resume_inspect_with_mock_data(tmp_path) -> None:
     assert run_payload["directive"]["geographic_area"] == "Dallas-Fort Worth TX"
     assert Path(run_payload["artifact_paths"]["json"]).exists()
     company_id = run_payload["companies"][0]["company_id"]
-    contact_id = run_payload["contacts"][0]["contact_id"]
+    assert run_payload["contacts"] == []
+    assert run_payload["metadata"]["needs_contact_count"] == 1
 
     inspect_result = subprocess.run(
         [
@@ -202,7 +203,7 @@ def test_cli_tiered_run_resume_inspect_with_mock_data(tmp_path) -> None:
         json.dumps(
             {
                 "approved_company_ids": [company_id],
-                "approved_contact_ids": [contact_id],
+                "approved_contact_ids": [],
                 "reviewer": "tester",
             }
         )
@@ -222,7 +223,7 @@ def test_cli_tiered_run_resume_inspect_with_mock_data(tmp_path) -> None:
             str(approval_path),
             "--enable-final-enrichment",
             "--mock-final-enrichment",
-            f"{company_id}|{contact_id}|Approved enrichment only|mock",
+            f"{company_id}||Approved enrichment only|mock",
             "--json",
         ],
         check=True,

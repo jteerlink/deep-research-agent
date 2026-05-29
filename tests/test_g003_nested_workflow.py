@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -124,6 +125,7 @@ def test_model_client_records_fallback_events_for_unavailable_hosted_providers()
         build_model_client(config).invoke(ModelRequest(node="researcher", prompt="query"))
     )
 
+    assert response.structured is not None
     assert response.structured["status"] == "no_available_model"
     assert [event.provider for event in response.fallback_events] == [
         ModelProvider.CODEX,
@@ -349,7 +351,7 @@ def test_configured_ollama_live_judgment_can_export_qualified_prospect(monkeypat
 
 
 def test_ollama_model_transport_uses_configured_ca_bundle(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
     verify_context = object()
 
     class FakeResponse:

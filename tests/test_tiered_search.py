@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -81,12 +83,17 @@ def test_contact_and_personalization_queries_are_scoped_to_targets() -> None:
     contact = ContactSearchTarget("Jane Smith", "Acme Air", title="Owner")
 
     assert build_contact_discovery_queries(directive, company) == (
-        "Acme Air owner",
-        "Acme Air growth lead",
-        "site:linkedin.com/in Acme Air owner OR growth lead",
-        "site:acme.example team",
-        "site:acme.example about",
-        "site:acme.example leadership",
+        "site:acme.example contact",
+        "site:acme.example contact us",
+        "site:acme.example phone",
+        "site:acme.example email",
+        "site:acme.example locations",
+        "site:acme.example schedule service",
+        "Acme Air contact",
+        "Acme Air phone",
+        "Acme Air email",
+        "Acme Air locations",
+        "Acme Air schedule service",
     )
     assert build_personalization_queries(directive, contact) == (
         "Jane Smith Acme Air Owner",
@@ -161,7 +168,13 @@ def test_early_company_discovery_does_not_instantiate_default_search_chain(monke
     imports: list[str] = []
     real_import = builtins.__import__
 
-    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):  # type: ignore[no-untyped-def]
+    def guarded_import(
+        name: str,
+        globals: dict[str, Any] | None = None,
+        locals: dict[str, Any] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> ModuleType:
         imports.append(name)
         if name == "async_multi_search":
             raise AssertionError("default AsyncMultiProviderSearch chain should stay unimported")

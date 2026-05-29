@@ -12,7 +12,7 @@ import csv
 import html
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
@@ -32,7 +32,13 @@ from .tiered_models import (
     TieredResearchRun,
 )
 
-TIERED_ARTIFACT_SCHEMA_VERSION = "tiered.prospect_artifacts.v1"
+TIERED_ARTIFACT_SCHEMA_VERSION = "tiered.prospect_artifacts.v2"
+CONTACT_RECORD_SEMANTICS = "company_contact_point.v1"
+LEGACY_CONTACT_COUNT_ALIASES = (
+    "ready_contact_count",
+    "contact_candidate_count",
+    "companies_with_contacts_count",
+)
 
 
 class TieredArtifactPaths(NamedTuple):
@@ -66,12 +72,18 @@ _COMPANY_FIELDS = (
 _CONTACT_FIELDS = (
     "contact_id",
     "company_id",
+    "contact_kind",
+    "label",
     "name",
     "title",
     "role_category",
     "profile_urls",
     "email",
     "phone",
+    "url",
+    "contact_url",
+    "source_url",
+    "source_confidence",
     "contact_confidence",
     "evidence_ids",
     "notes",
@@ -90,6 +102,12 @@ _FINAL_ENRICHMENT_FIELDS = (
     "company_id",
     "contact_id",
     "provider",
+    "contact_kind",
+    "contact_label",
+    "email",
+    "phone",
+    "contact_url",
+    "source_url",
     "summary",
     "evidence_ids",
     "warnings",
@@ -99,8 +117,10 @@ _QUALIFICATION_COUNT_KEYS = (
     "company_prospect_count",
     "ready_contact_count",
     "contact_candidate_count",
+    "contact_point_count",
     "qualified_company_count",
     "companies_with_contacts_count",
+    "companies_with_contact_points_count",
     "needs_contact_count",
     "rejected_candidate_count",
 )
@@ -115,8 +135,14 @@ def build_tiered_artifact_payload(
     """Return the deterministic JSON payload for a tiered research run."""
 
     normalized = _coerce_run(run)
+    _validate_company_contact_point_contacts(normalized)
     final_enrichment = tuple(_coerce_final_enrichment(item) for item in final_enrichment_records)
-    merged_metadata = dict(metadata or {})
+    final_enrichment = _hydrate_final_enrichment_records(final_enrichment, normalized)
+    merged_metadata = {
+        **dict(metadata or {}),
+        "contact_record_semantics": CONTACT_RECORD_SEMANTICS,
+        "legacy_contact_count_aliases": list(LEGACY_CONTACT_COUNT_ALIASES),
+    }
     qualification_audit = _qualification_audit_records(run, merged_metadata)
     qualification_summary = _qualification_summary(
         normalized,
@@ -160,7 +186,9 @@ def write_tiered_artifacts(
     """Write JSON, CSV, and Markdown artifacts for a tiered prospecting run."""
 
     normalized = _coerce_run(run)
+    _validate_company_contact_point_contacts(normalized)
     final_enrichment = tuple(_coerce_final_enrichment(item) for item in final_enrichment_records)
+    final_enrichment = _hydrate_final_enrichment_records(final_enrichment, normalized)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -169,9 +197,7 @@ def write_tiered_artifacts(
     contacts_csv_path = output_path / "contacts.csv"
     personalization_csv_path = output_path / "personalization.csv"
     markdown_path = output_path / "research_report.md"
-    final_enrichment_csv_path = (
-        output_path / "final_enrichment.csv" if final_enrichment else None
-    )
+    final_enrichment_csv_path = output_path / "final_enrichment.csv" if final_enrichment else None
 
     json_path.write_text(
         json.dumps(
@@ -310,6 +336,22 @@ def _coerce_contact(value: ContactCandidate | Mapping[str, Any]) -> ContactCandi
             default=0.0,
         ),
         notes=str(value.get("notes") or ""),
+        contact_kind=cast(Any, _required_contact_kind(value)),
+        label=str(value.get("label") or value.get("name") or ""),
+        url=str(value.get("url") or ""),
+        contact_url=str(value.get("contact_url") or value.get("url") or ""),
+        source_url=str(value.get("source_url") or ""),
+        source_confidence=cast(SourceConfidence, str(value.get("source_confidence") or "medium")),
+    )
+
+
+def _required_contact_kind(value: Mapping[str, Any]) -> str:
+    raw = value.get("contact_kind")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    raise ValueError(
+        "legacy contact payload missing contact_kind; rerun tiered research or migrate "
+        "the checkpoint before writing company-contact artifacts"
     )
 
 
@@ -397,7 +439,53 @@ def _coerce_final_enrichment(
         evidence_ids=_evidence_ids(value, f"final enrichment {enrichment_id}"),
         provider=str(value.get("provider") or "mock"),
         warnings=tuple(value.get("warnings") or ()),
+        contact_snapshot=value.get("contact_snapshot"),
     )
+
+
+def _hydrate_final_enrichment_records(
+    records: Sequence[FinalEnrichmentRecord],
+    run: TieredResearchRun,
+) -> tuple[FinalEnrichmentRecord, ...]:
+    contacts_by_id = {contact.contact_id: contact for contact in run.contacts}
+    hydrated: list[FinalEnrichmentRecord] = []
+    for record in records:
+        if record.contact_snapshot is not None or not record.contact_id:
+            hydrated.append(record)
+            continue
+        contact = contacts_by_id.get(record.contact_id)
+        if contact is None:
+            hydrated.append(record)
+            continue
+        hydrated.append(replace(record, contact_snapshot=_contact_snapshot(contact)))
+    return tuple(hydrated)
+
+
+def _validate_company_contact_point_contacts(run: TieredResearchRun) -> None:
+    person_contacts = [
+        contact.contact_id for contact in run.contacts if contact.contact_kind == "person"
+    ]
+    if person_contacts:
+        raise ValueError(
+            "contacts.csv company_contact_point.v1 does not accept person contact rows: "
+            f"{person_contacts}"
+        )
+
+
+def _contact_snapshot(contact: ContactCandidate) -> dict[str, str]:
+    return {
+        "contact_id": contact.contact_id,
+        "company_id": contact.company_id,
+        "contact_kind": contact.contact_kind,
+        "label": contact.label,
+        "name": contact.name,
+        "title": contact.title,
+        "email": contact.email or "",
+        "phone": contact.phone or "",
+        "url": contact.url,
+        "contact_url": contact.contact_url,
+        "source_url": contact.source_url,
+    }
 
 
 def _qualification_audit_records(
@@ -466,8 +554,14 @@ def _qualification_summary(
             len(accepted_contact_ids) if accepted_contact_ids else len(run.contacts)
         ),
         "contact_candidate_count": len(run.contacts),
+        "contact_point_count": len(run.contacts),
         "qualified_company_count": len(run.companies),
         "companies_with_contacts_count": len(
+            accepted_contact_company_ids
+            if accepted_contact_company_ids
+            else {company_id for company_id, count in contacts_by_company.items() if count}
+        ),
+        "companies_with_contact_points_count": len(
             accepted_contact_company_ids
             if accepted_contact_company_ids
             else {company_id for company_id, count in contacts_by_company.items() if count}
@@ -485,10 +579,7 @@ def _qualification_summary(
             1 for record in audit_records if _audit_status(record) == "rejected"
         ),
     }
-    return {
-        key: _metadata_count(metadata, key, default=value)
-        for key, value in defaults.items()
-    }
+    return {key: _metadata_count(metadata, key, default=value) for key, value in defaults.items()}
 
 
 def _metadata_count(metadata: Mapping[str, Any], key: str, *, default: int) -> int:
@@ -603,12 +694,18 @@ def _contact_row(contact: ContactCandidate) -> dict[str, Any]:
     return {
         "contact_id": contact.contact_id,
         "company_id": contact.company_id,
+        "contact_kind": contact.contact_kind,
+        "label": contact.label,
         "name": contact.name,
         "title": contact.title,
         "role_category": contact.role_category,
         "profile_urls": contact.profile_urls,
         "email": contact.email,
         "phone": contact.phone,
+        "url": contact.url,
+        "contact_url": contact.contact_url,
+        "source_url": contact.source_url,
+        "source_confidence": contact.source_confidence,
         "contact_confidence": contact.contact_confidence,
         "evidence_ids": contact.evidence_ids,
         "notes": contact.notes,
@@ -636,10 +733,22 @@ def _final_enrichment_row(record: FinalEnrichmentRecord) -> dict[str, Any]:
         "company_id": record.company_id,
         "contact_id": record.contact_id,
         "provider": record.provider,
+        "contact_kind": _snapshot_value(record, "contact_kind"),
+        "contact_label": _snapshot_value(record, "label") or _snapshot_value(record, "name"),
+        "email": _snapshot_value(record, "email"),
+        "phone": _snapshot_value(record, "phone"),
+        "contact_url": _snapshot_value(record, "contact_url") or _snapshot_value(record, "url"),
+        "source_url": _snapshot_value(record, "source_url"),
         "summary": record.summary,
         "evidence_ids": record.evidence_ids,
         "warnings": record.warnings,
     }
+
+
+def _snapshot_value(record: FinalEnrichmentRecord, key: str) -> str:
+    snapshot = record.contact_snapshot if isinstance(record.contact_snapshot, Mapping) else {}
+    value = snapshot.get(key, "")
+    return "" if value is None else str(value)
 
 
 def _write_csv(
@@ -669,6 +778,10 @@ def _render_markdown_report(
         personalization.contact_id: personalization for personalization in run.personalizations
     }
     summary = dict(qualification_summary or {})
+    companies_with_contact_info = summary.get(
+        "companies_with_contact_points_count",
+        summary.get("companies_with_contacts_count", 0),
+    )
 
     lines = [
         "# Tiered Prospect Research Report",
@@ -683,13 +796,13 @@ def _render_markdown_report(
         "## Summary",
         "",
         f"- Company prospects: {summary.get('company_prospect_count', len(run.companies))}",
-        f"- Contact candidates: {summary.get('contact_candidate_count', len(run.contacts))}",
+        f"- Company contact points: {summary.get('contact_point_count', len(run.contacts))}",
         f"- Personalization signals: "
         f"{sum(len(item.personalization_signals) for item in run.personalizations)}",
         f"- Browser captures: {len(run.browser_captures)}",
         f"- Final enrichment records: {len(final_enrichment)}",
-        f"- Companies with contacts: {summary.get('companies_with_contacts_count', 0)}",
-        f"- Companies needing contacts: {summary.get('needs_contact_count', 0)}",
+        f"- Companies with contact info: {companies_with_contact_info}",
+        f"- Companies needing contact info: {summary.get('needs_contact_count', 0)}",
         f"- Rejected/noisy candidates: {summary.get('rejected_candidate_count', 0)}",
         "",
         "## Qualified Companies",
@@ -709,13 +822,22 @@ def _render_markdown_report(
 
         company_contacts = contacts_by_company.get(company.company_id, [])
         if company_contacts:
-            lines.extend(["", "#### Contact Candidates"])
+            lines.extend(["", "#### Company contact info"])
         for contact in company_contacts:
-            heading = contact.name
-            if contact.title:
+            heading = contact.label or contact.name
+            if contact.contact_kind == "person" and contact.title:
                 heading += f", {contact.title}"
-            lines.extend(["", f"##### Contact: {_escape_markdown(heading)}", ""])
-            if contact.profile_urls:
+            lines.extend(["", f"##### Contact info: {_escape_markdown(heading)}", ""])
+            lines.append(f"- Type: {_escape_markdown(contact.contact_kind)}")
+            if contact.email:
+                lines.append(f"- Email: {_escape_markdown(contact.email)}")
+            if contact.phone:
+                lines.append(f"- Phone: {_escape_markdown(contact.phone)}")
+            if contact.contact_url or contact.url:
+                lines.append(f"- URL: {contact.contact_url or contact.url}")
+            if contact.source_url:
+                lines.append(f"- Source: {contact.source_url}")
+            if contact.profile_urls and contact.contact_kind == "person":
                 lines.append(f"- Profile: {contact.profile_urls[0]}")
             lines.append(f"- Confidence: {contact.contact_confidence}")
             personalization = personalizations_by_contact.get(contact.contact_id)
@@ -724,20 +846,18 @@ def _render_markdown_report(
                 for signal in personalization.personalization_signals:
                     lines.append(f"- {_escape_markdown(signal.signal)}")
                     if signal.message_angle:
-                        lines.append(
-                            f"  - Message angle: {_escape_markdown(signal.message_angle)}"
-                        )
+                        lines.append(f"  - Message angle: {_escape_markdown(signal.message_angle)}")
                 if personalization.do_not_claim:
                     lines.append(
                         f"  - Do not claim: "
                         f"{_escape_markdown('; '.join(personalization.do_not_claim))}"
-            )
+                    )
 
     needs_contact_records = [
         record for record in qualification_audit if _audit_status(record) == "needs_contact"
     ]
     if needs_contact_records:
-        lines.extend(["", "## Qualified companies needing contacts", ""])
+        lines.extend(["", "## Qualified companies needing contact info", ""])
         lines.extend(_render_audit_record(record) for record in needs_contact_records)
 
     rejected_records = [

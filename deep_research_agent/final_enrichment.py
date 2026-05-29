@@ -39,13 +39,11 @@ async def enrich_selected_prospects(
         )
         if non_exa_providers:
             raise ValueError(
-                "final enrichment search must use Exa results only; got "
-                f"{non_exa_providers}"
+                f"final enrichment search must use Exa results only; got {non_exa_providers}"
             )
 
         evidence_ids = tuple(
-            f"ev_final_exa_{index:03d}_{rank:03d}"
-            for rank, _result in enumerate(results, start=1)
+            f"ev_final_exa_{index:03d}_{rank:03d}" for rank, _result in enumerate(results, start=1)
         )
         warnings: tuple[str, ...] = ()
         if not evidence_ids:
@@ -68,6 +66,7 @@ async def enrich_selected_prospects(
                 evidence_ids=evidence_ids,
                 provider="exa",
                 warnings=warnings,
+                contact_snapshot=_contact_snapshot(contact),
             )
         )
     return tuple(records)
@@ -116,10 +115,23 @@ def _final_enrichment_query(
         company.name,
         run.directive.industry,
         run.directive.geographic_area,
-        "recent news leadership business context",
+        "recent news business context",
     ]
     if contact is not None:
-        parts[:0] = [contact.name, contact.title]
+        if contact.contact_kind == "person":
+            parts[:0] = [contact.name, contact.title]
+            parts.append("leadership context")
+        else:
+            parts.extend(
+                [
+                    contact.label or contact.name,
+                    contact.email or "",
+                    contact.phone or "",
+                    contact.contact_url or contact.url or "",
+                    contact.source_url or "",
+                    "official company contact information",
+                ]
+            )
     if company.website:
         parts.append(company.website)
     return " ".join(part.strip() for part in parts if part.strip())
@@ -153,7 +165,7 @@ def _final_enrichment_summary(
     contact: ContactCandidate | None,
     results: Sequence[dict[str, Any]],
 ) -> str:
-    subject = f"{contact.name} at {company_name}" if contact else company_name
+    subject = _enrichment_subject(company_name, contact)
     if not results:
         return f"Exa found no final enrichment results for {subject}."
 
@@ -170,6 +182,33 @@ def _final_enrichment_summary(
             excerpt += f": {content}"
         excerpts.append(excerpt)
     return f"Exa final enrichment for {subject}: " + " | ".join(excerpts)
+
+
+def _contact_snapshot(contact: ContactCandidate | None) -> dict[str, str] | None:
+    if contact is None:
+        return None
+    return {
+        "contact_id": contact.contact_id,
+        "company_id": contact.company_id,
+        "contact_kind": contact.contact_kind,
+        "label": contact.label,
+        "name": contact.name,
+        "title": contact.title,
+        "email": contact.email or "",
+        "phone": contact.phone or "",
+        "url": contact.url,
+        "contact_url": contact.contact_url,
+        "source_url": contact.source_url,
+    }
+
+
+def _enrichment_subject(company_name: str, contact: ContactCandidate | None) -> str:
+    if contact is None:
+        return company_name
+    if contact.contact_kind == "person":
+        return f"{contact.name} at {company_name}"
+    label = contact.label or contact.name or "company contact info"
+    return f"{company_name} {label}"
 
 
 def _slug(value: str) -> str:

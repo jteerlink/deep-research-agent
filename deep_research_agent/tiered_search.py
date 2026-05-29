@@ -235,19 +235,31 @@ def build_contact_discovery_queries(
     directive: TieredSearchDirective,
     company: CompanySearchTarget,
 ) -> tuple[str, ...]:
-    """Build Tier 2 company-scoped contact-discovery queries."""
+    """Build Tier 2 company-owned contact-channel discovery queries."""
 
-    roles = directive.preferred_contact_roles or (
-        "owner",
-        "founder",
-        "CEO",
-        "marketing director",
-    )
-    seeds = [f"{company.name} {role}" for role in roles]
-    seeds.append(f"site:linkedin.com/in {company.name} {' OR '.join(roles[:3])}")
+    del directive  # Contact discovery is company-channel based, not person-role based.
+    seeds: list[str] = []
     if company.website:
         domain = company.website.removeprefix("https://").removeprefix("http://").split("/", 1)[0]
-        seeds.extend((f"site:{domain} team", f"site:{domain} about", f"site:{domain} leadership"))
+        seeds.extend(
+            (
+                f"site:{domain} contact",
+                f"site:{domain} contact us",
+                f"site:{domain} phone",
+                f"site:{domain} email",
+                f"site:{domain} locations",
+                f"site:{domain} schedule service",
+            )
+        )
+    seeds.extend(
+        (
+            f"{company.name} contact",
+            f"{company.name} phone",
+            f"{company.name} email",
+            f"{company.name} locations",
+            f"{company.name} schedule service",
+        )
+    )
     return _dedupe_preserve_order(seeds)
 
 

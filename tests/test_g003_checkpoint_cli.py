@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from deep_research_agent.agent import (
     inspect_research_thread,
@@ -12,8 +13,8 @@ from deep_research_agent.agent import (
 )
 
 
-def _event_types(payload: dict[str, object]) -> set[str]:
-    return {str(event["type"]) for event in payload["events"]}  # type: ignore[index]
+def _event_types(payload: dict[str, Any]) -> set[str]:
+    return {str(event["type"]) for event in payload["events"]}
 
 
 def test_local_workflow_checkpoint_records_review_interrupt_and_metadata(tmp_path: Path) -> None:
