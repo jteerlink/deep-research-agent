@@ -1,110 +1,18 @@
-# Deep Research Agent
+# Standalone Ollama Exa Leadgen
 
-Foundation package for a local-first tiered prospect research agent. The package
-keeps the existing `async_multi_search.py` import path working while centering
-the review-gated `tiered-preview`, `tiered-run`, `tiered-inspect`, and
-`tiered-resume` workflow.
+This branch intentionally contains only the lightweight lead-generation surfaces:
+
+- `.agents/skills/lead-research-assistant/SKILL.md` — prompt skill for qualitative lead research and outreach strategy.
+- `standalone/ollama_exa_leadgen/` — isolated CLI for Ollama Cloud planning plus Exa discovery.
+- `docs/standalone-ollama-exa-leadgen-spec.md` — implementation spec and rationale.
+
+The original deep research agent is preserved on the `archive/deep-research-agent` branch.
 
 ## Quick start
 
 ```bash
-cp .env.example .env
-python -m deep_research_agent --help
-python -m deep_research_agent config --json
-python -m deep_research_agent search-providers
+cd standalone/ollama_exa_leadgen
+PYTHONPATH=src python3 -m ollama_exa_leadgen plan --icp-file examples/dental-dfw-icp.json --target-count 5
 ```
 
-See [docs/usage.md](docs/usage.md) for offline smoke, optional live smoke,
-tiered checkpoint/resume, and artifact examples.
-
-Optional local UI:
-
-```bash
-python -m pip install -e '.[ui]'
-deep-research-agent ui
-```
-
-The UI reads provider keys from `.env` or already-exported shell environment
-variables; it does not ask for secrets in the browser. Fill industry/niche,
-geography, and research criteria so runs search for potential business targets
-rather than generic articles about a topic.
-
-## Tiered prospect research
-
-Use `tiered-run` for a local, review-gated tiered prospect package. The first
-slice is still offline-testable: mock company results stand in for injected
-search, artifacts are written locally, and final enrichment is blocked until a
-human-approved selection is supplied.
-
-```bash
-python -m deep_research_agent tiered-run \
-  --industry "dental" \
-  --geography "DFW area" \
-  --criteria "multi-location practices with reactivation opportunity" \
-  --preferred-contact-role owner \
-  --thread-id demo-tiered \
-  --mock-result "Acme Dental|https://acme.example|Multi-location group|mock" \
-  --json
-```
-
-Review state can be inspected and resumed:
-
-```bash
-python -m deep_research_agent tiered-inspect demo-tiered --json
-python -m deep_research_agent tiered-resume demo-tiered \
-  --approve-selection approval.json \
-  --enable-final-enrichment \
-  --mock-final-enrichment "company_acme_dental|contact_company_acme_dental_001|Approved enrichment|mock" \
-  --json
-```
-
-Use `tiered-preview` when you only need to verify how an industry/geography
-directive expands into company, contact, and personalization query templates:
-
-```bash
-python -m deep_research_agent tiered-preview \
-  --industry "dental" \
-  --geography "DFW area" \
-  --criteria "multi-location practices with reactivation opportunity" \
-  --preferred-contact-role owner \
-  --json
-```
-
-The preview does not perform network search, browser capture, enrichment, or
-outreach. Early tiered discovery is intentionally wired around injected search
-callables so it does not instantiate the default `AsyncMultiProviderSearch()`
-provider chain during early discovery; Exa remains reserved for approved final
-enrichment.
-
-## Provider configuration
-
-The configuration intentionally uses Ollama Cloud for Ollama model calls. Local
-Ollama endpoints such as `localhost:11434` are not used as defaults or accepted
-as available model transports.
-
-- `ollama_native`: uses `OLLAMA_NATIVE_BASE_URL=https://ollama.com/api`,
-  `OLLAMA_NATIVE_MODEL`, and `OLLAMA_API_KEY`.
-- `ollama_openai`: uses `DRA_OLLAMA_OPENAI_BASE_URL`,
-  `DRA_OLLAMA_OPENAI_MODEL`, and `DRA_OLLAMA_OPENAI_API_KEY` only for a
-  non-local hosted OpenAI-compatible endpoint.
-- `openai`: uses `OPENAI_API_KEY`, `OPENAI_MODEL`, and `OPENAI_BASE_URL`.
-- `codex`: uses `CODEX_API_KEY`, `CODEX_MODEL`, and `CODEX_BASE_URL`.
-
-Search provider keys remain compatible with the standalone module:
-`TAVILY_API_KEY`, `EXA_API_KEY`, `SERPER_API_KEY`, `FIRECRAWL_API_KEY`, and
-`YDC_API_KEY`. Provider priority is `tavily`, `exa`, `serper`, `firecrawl`,
-`ydc`, then keyless `duckduckgo`. If a corporate proxy causes certificate
-verification failures, set `DEEP_RESEARCH_CA_BUNDLE` to a PEM bundle; on macOS,
-the search client auto-generates a local bundle from the system keychain when no
-explicit bundle is configured.
-
-Prospect extraction first applies broad deterministic triage to reject obvious
-directories, aggregators, social/job pages, listicles, reviews, and vendor-noise
-results. Plausible owned-domain candidates then go through structured LLM
-judgment when a configured provider is available, with deterministic fallback for
-offline runs.
-
-Use `deep-research-agent model-status` before model-assisted prospect work to
-verify the redacted live-model configuration. `--live-smoke` performs an
-optional structured JSON call against the first available hosted provider. Tiered
-runs remain review-gated and offline-testable when hosted models are unavailable.
+Live runs require `EXA_API_KEY` and `OLLAMA_API_KEY`.

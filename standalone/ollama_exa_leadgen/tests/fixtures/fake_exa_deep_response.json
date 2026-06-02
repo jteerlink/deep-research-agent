@@ -1,0 +1,19 @@
+{
+  "output": {
+    "content": {
+      "companies": [
+        {"company_name": "Alpha Dental", "website": "https://alpha.example", "product_description": "Family dentistry", "icp_fit_score": 9, "icp_fit_reasoning": "Multi-location practice with recall opportunity", "headquarters_location": "Dallas, TX", "recent_signal": "Opened a second office", "decision_maker_titles": ["Owner", "Practice Manager"]},
+        {"company_name": "Beta Dental", "website": "https://beta.example", "product_description": "Cosmetic dentistry", "icp_fit_score": 8, "icp_fit_reasoning": "Review growth suggests follow-up need", "headquarters_location": "Fort Worth, TX", "recent_signal": "Strong review volume", "decision_maker_titles": ["Owner"]},
+        {"company_name": "Gamma Smiles", "website": "https://gamma.example", "product_description": "Orthodontics", "icp_fit_score": 7, "icp_fit_reasoning": "Multiple services and recall opportunity", "headquarters_location": "Plano, TX", "recent_signal": "Expanded services", "decision_maker_titles": ["Office Manager"]},
+        {"company_name": "Delta Dental Care", "website": "https://delta.example", "product_description": "General dentistry", "icp_fit_score": 7, "icp_fit_reasoning": "Local practice with review follow-up signal", "headquarters_location": "Arlington, TX", "recent_signal": "Many public reviews", "decision_maker_titles": ["Practice Manager"]},
+        {"company_name": "Epsilon Dental", "website": "https://epsilon.example", "product_description": "Dental implants", "icp_fit_score": 6, "icp_fit_reasoning": "Procedure mix creates recall opportunity", "headquarters_location": "Irving, TX", "recent_signal": "Promotes consultations", "decision_maker_titles": ["Owner"]},
+        {"company_name": "Zeta Family Dentistry", "website": "https://zeta.example", "product_description": "Family dental care", "icp_fit_score": 6, "icp_fit_reasoning": "Family practice likely values recall", "headquarters_location": "Denton, TX", "recent_signal": "New patient promotions", "decision_maker_titles": ["Office Manager"]},
+        {"company_name": "Eta Dental Group", "website": "https://eta.example", "product_description": "Group dental offices", "icp_fit_score": 8, "icp_fit_reasoning": "Group footprint fits multi-location ICP", "headquarters_location": "Dallas, TX", "recent_signal": "Multiple offices listed", "decision_maker_titles": ["Operations Director"]},
+        {"company_name": "Theta Smiles", "website": "https://theta.example", "product_description": "Pediatric dentistry", "icp_fit_score": 5, "icp_fit_reasoning": "Patient recall fit but narrower specialty", "headquarters_location": "Frisco, TX", "recent_signal": "Appointment reminders promoted", "decision_maker_titles": ["Practice Manager"]},
+        {"company_name": "Iota Dental Studio", "website": "https://iota.example", "product_description": "Cosmetic studio", "icp_fit_score": 5, "icp_fit_reasoning": "Growth signal but single-location unclear", "headquarters_location": "McKinney, TX", "recent_signal": "Paid ads visible", "decision_maker_titles": ["Owner"]},
+        {"company_name": "Kappa Dental Partners", "website": "https://kappa.example", "product_description": "Dental partnership group", "icp_fit_score": 9, "icp_fit_reasoning": "Partnership group strongly matches DSO ICP", "headquarters_location": "North Texas", "recent_signal": "Partner offices listed", "decision_maker_titles": ["Growth Director"]},
+        {"company_name": "Alpha Dental LLC", "website": "https://alpha.example", "product_description": "Family dentistry", "icp_fit_score": 10, "icp_fit_reasoning": "Duplicate with stronger score", "headquarters_location": "Dallas, TX", "recent_signal": "Second office and reviews", "decision_maker_titles": ["Owner"]}
+      ]
+    }
+  }
+}

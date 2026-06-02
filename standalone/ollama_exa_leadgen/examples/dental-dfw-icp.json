@@ -1,0 +1,19 @@
+{
+  "campaign_name": "dental-dfw-reactivation",
+  "buyer_offer": "Patient reactivation and recall follow-up system",
+  "target_count": 10,
+  "icp_description": "Dallas-Fort Worth dental practices or DSOs with multi-location growth, patient reactivation, recall, review follow-up, or marketing opportunity",
+  "geographies": ["Dallas-Fort Worth", "North Texas"],
+  "include_signals": ["multiple locations", "patient recall", "reviews", "growth", "paid ads"],
+  "exclude": ["national chains", "directories", "marketing agencies", "software vendors", "listicles"],
+  "preferred_columns": [
+    "company_name",
+    "website",
+    "product_description",
+    "icp_fit_score",
+    "icp_fit_reasoning",
+    "headquarters_location",
+    "recent_signal",
+    "decision_maker_titles"
+  ]
+}

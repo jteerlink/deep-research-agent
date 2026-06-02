@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "lead-research-assistant": {
+      "source": "ComposioHQ/awesome-claude-skills",
+      "sourceType": "github",
+      "skillPath": "lead-research-assistant/SKILL.md",
+      "computedHash": "08cf5477dfdcbefa0758fad431c226efb9f09e108c8c6477b4a14db2d6810889"
+    }
+  }
+}
